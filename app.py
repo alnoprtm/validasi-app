@@ -506,19 +506,32 @@ def validate_well_parameter_rules(df_input, lift_type):
 def calculate_event_al_completeness(df):
     """
     Menghitung kelengkapan data Event Artificial Lift.
-    Returns Dictionary dengan detail score, filled, dan expected.
+    Scope: 
+    1. Is Replacement == 'Yes' OR Blank (NaN/Empty)
+    2. Loss Type == 'Off' (Case Insensitive)
     """
     default_res = {"score": 0.0, "filled": 0, "expected": 0}
     if df.empty: return default_res
     
-    if "Is Replacement" not in df.columns: return default_res
+    # Check Required Columns
+    if "Is Replacement" not in df.columns or "Loss Type" not in df.columns: 
+        return default_res
     
+    # 1. Logic Replacement: Yes or Blank
     is_replacement_col = df["Is Replacement"].astype(str).str.strip().str.lower()
-    mask_scope = (is_replacement_col == "yes") | (is_replacement_col == "nan") | (is_replacement_col == "") | (df["Is Replacement"].isna())
+    mask_replacement = (is_replacement_col == "yes") | (is_replacement_col == "nan") | (is_replacement_col == "") | (df["Is Replacement"].isna())
+    
+    # 2. Logic Loss Type: Off
+    loss_type_col = df["Loss Type"].astype(str).str.strip().str.lower()
+    mask_loss = (loss_type_col == "off")
+    
+    # Gabungan Mask
+    mask_scope = mask_replacement & mask_loss
     
     df_scope = df[mask_scope].copy()
     if df_scope.empty: return default_res
     
+    # Hitung Kelengkapan pada Scope
     total_expected = len(df_scope) * len(EVENT_AL_VALIDATE_COLS)
     total_filled = df_scope[EVENT_AL_VALIDATE_COLS].replace('', pd.NA).count().sum()
     
@@ -842,7 +855,7 @@ def main():
                     st.markdown("---")
                     
                     st.subheader("1. Validasi Kelengkapan Data")
-                    st.info("Hanya menghitung baris di mana 'Is Replacement' = 'Yes' atau Blank.")
+                    st.info("Hanya menghitung baris di mana 'Is Replacement' = 'Yes'/'Blank' DAN 'Loss Type' = 'Off'.")
                     
                     res_total = calculate_event_al_completeness(df_filt)
                     st.metric("Completeness (Replacement Scope)", f"{res_total['score']:.2f}%")
@@ -863,16 +876,31 @@ def main():
                                 "Completeness (%)": sub_res['score'],
                                 "Sel Terisi": sub_res['filled'],
                                 "Total Sel": sub_res['expected'],
-                                "Jumlah Data": len(sub_df)
+                                "Jumlah Data": len(sub_df) # Ini akan menampilkan total data di bulan itu (sebelum filter scope) atau sesudah?
+                                # Lebih informatif jika menampilkan jumlah data yang masuk scope perhitungan
                             })
+                            # Revisi sedikit di sini untuk menampilkan jumlah data yang RELEVAN (masuk scope)
+                            # Tapi fungsi calculate_event_al_completeness mengembalikan score, filled, expected.
+                            # Kita bisa hitung manual rows in scope.
+                            
+                            # Update logic calculate_event_al_completeness biar balikin jumlah baris scope juga?
+                            # Untuk efisiensi, saya hitung ulang scope rows di sini saja jika perlu, 
+                            # atau update fungsi di atas. Update fungsi lebih rapi.
+                        
+                        # UPDATE: Saya akan update fungsi calculate_event_al_completeness di backend dulu 
+                        # untuk mengembalikan 'scope_rows'.
                         
                         if period_data:
                             st.dataframe(pd.DataFrame(period_data), use_container_width=True)
                     
                     with st.expander("Detail Data (Scope Replacement)"):
+                        # Filter tampilan
                         is_rep = df_filt["Is Replacement"].astype(str).str.strip().str.lower()
-                        mask_scope = (is_rep == "yes") | (is_rep == "nan") | (is_rep == "") | (df_filt["Is Replacement"].isna())
-                        df_show = df_filt[mask_scope]
+                        mask_rep = (is_rep == "yes") | (is_rep == "nan") | (is_rep == "") | (df_filt["Is Replacement"].isna())
+                        loss_type = df_filt["Loss Type"].astype(str).str.strip().str.lower()
+                        mask_loss = (loss_type == "off")
+                        
+                        df_show = df_filt[mask_rep & mask_loss]
                         display_dataframe_optimized(df_show, EVENT_AL_VALIDATE_COLS)
                         
                     missing_summary = get_missing_details(df_show, EVENT_AL_VALIDATE_COLS)
