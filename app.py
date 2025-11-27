@@ -154,12 +154,12 @@ DAILY_PROD_CONFIG = {
     "Working Area Production": {
         "columns": ["Regional", "Zona", "Working Area", "EntityID", "Production Date", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)"],
         "validate": ["Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)"],
-        "hierarchy": ["Regional", "Zona", "Working Area"]
+        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
     },
     "Asset Operation Production": {
         "columns": ["Regional", "Zona", "Working Area", "Asset Operation", "EntityID", "Production Date", "Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond. Form. (BCPD)", "Cond. Plant. (BCPD)"],
         "validate": ["Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond. Form. (BCPD)", "Cond. Plant. (BCPD)"],
-        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation"]
+        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
     },
     "Well Production": {
         "columns": ["No", "Regional", "Zona", "Working Area", "Asset Operation", "Well", "Entity ID", "Production Date", "Flowing Time", "Down Time", "Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond.Form. (BCPD)"],
@@ -785,7 +785,7 @@ def main():
                 else:
                     st.subheader("Filter Data Rekonsiliasi")
                     recon_filt = recon_df.copy()
-                    recon_hier = ["Regional", "Zona", "Working Area", "Asset Operation"]
+                    recon_hier = ["Regional", "Zona", "Working Area", "Asset Operation", "Well"] # Added Well
                     cols_filt = st.columns(len(recon_hier))
                     for i, col in enumerate(recon_hier):
                         if col in recon_filt.columns:
