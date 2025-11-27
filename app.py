@@ -16,7 +16,7 @@ st.set_page_config(
 # Menaikkan batas limit styling pandas
 pd.set_option("styler.render.max_elements", 5000000)
 
-# Inisialisasi Session State untuk menyimpan data Asset Register
+# Inisialisasi Session State untuk menyimpan data Asset Register (KHUSUS SUB-MENU WELL)
 if 'asset_register_df' not in st.session_state:
     st.session_state['asset_register_df'] = None
 
@@ -165,6 +165,7 @@ def validate_engineering_rules(df_test, df_asset):
     check_rule1_active = False # Flag apakah validasi ini berjalan
     
     if df_asset is not None and not df_asset.empty:
+        # Pastikan kolom yang dibutuhkan ada
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
             check_rule1_active = True
             # 1. Ambil list Active Well Producing
@@ -182,8 +183,6 @@ def validate_engineering_rules(df_test, df_asset):
             cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0]
             
             # Cari sumur yang memiliki setidaknya satu tes dalam rentang 90 hari terakhir
-            # Sesuai aturan: "Minimal terdapat data well test setiap 3 bulan sekali"
-            # Artinya jika dalam 3 bulan terakhir ada tes (berapapun jumlahnya), well tersebut PATUH.
             recent_tests = res[res['Test Date'] >= cutoff_date]['Well'].unique()
             
             def check_rule1(row):
@@ -269,12 +268,13 @@ def main():
                     st.success(f"Data {sub_menu} dimuat: {len(df)} baris.")
                     df = df.dropna(how='all')
 
-                    # SIMPAN KE SESSION STATE JIKA SUB-MENU ADALAH "WELL"
-                    # Ini penting untuk referensi di Modul 2
+                    # --- LOGIKA PENYIMPANAN SESSION STATE ---
+                    # HANYA simpan jika user mengupload data pada sub-menu "Well"
+                    # Data dari Zona, Working Area, dll TIDAK BOLEH menimpa data Well
                     if sub_menu == "Well":
                         st.session_state['asset_register_df'] = df
-                        st.toast("Data Well tersimpan untuk referensi Modul Well Test!", icon="💾")
-
+                        st.toast("Data Well berhasil disimpan ke memori untuk referensi Modul Well Test!", icon="💾")
+                    
                     # --- FILTERING ---
                     df_filt = df.copy()
                     cols_filt = st.columns(len(config['filter_hierarchy']))
@@ -318,10 +318,12 @@ def main():
         
         # Cek Referensi Asset Register
         asset_ready = st.session_state['asset_register_df'] is not None
+        
         if not asset_ready:
-            st.warning("⚠️ Data 'Well' di Asset Register belum diupload. Validasi Rule 1 (Frekuensi 3 bulan) & Referensi Lifting Method tidak akan maksimal.")
+            st.warning("⚠️ **Peringatan:** Data 'Well' di Asset Register belum diupload.")
+            st.info("Silakan ke Menu 'Asset Register' > Sub-Menu 'Well', upload file, lalu kembali ke sini. Validasi Rule 1 (Frekuensi) & Referensi Lifting Method butuh data tersebut.")
         else:
-            st.success("✅ Terhubung dengan data Asset Register.")
+            st.success("✅ Terhubung dengan data referensi Asset Register (Sub-menu Well).")
 
         uploaded_test = st.file_uploader("Upload Excel Well Test", type=['xlsx', 'xls'])
         
@@ -342,16 +344,21 @@ def main():
                     df_test = df_test.dropna(how='all')
                     
                     # --- CROSS-REFERENCE LIFTING METHOD (Jika Kolom Kosong) ---
-                    # Jika user ingin menarik lifting method dari Asset Register
+                    # Hanya lakukan jika data asset well tersedia
                     if asset_ready:
-                        # Merge sederhana based on Well Name / Entity ID
-                        # Asumsi join key adalah 'Well'
-                        asset_ref = st.session_state['asset_register_df'][['Well', 'Lifting Method']].drop_duplicates('Well')
-                        # Jika di file test kosong, ambil dari asset
-                        if 'Lifting Method Name' in df_test.columns:
-                            # Lakukan mapping hanya jika kosong
-                            df_test = df_test.merge(asset_ref, on='Well', how='left', suffixes=('', '_asset'))
-                            df_test['Lifting Method Name'] = df_test['Lifting Method Name'].fillna(df_test['Lifting Method'])
+                        try:
+                            # Merge sederhana based on Well Name / Entity ID
+                            asset_ref = st.session_state['asset_register_df'][['Well', 'Lifting Method']].drop_duplicates('Well')
+                            
+                            # Jika kolom Lifting Method Name ada tapi kosong, kita isi dari asset
+                            if 'Lifting Method Name' in df_test.columns:
+                                df_test = df_test.merge(asset_ref, on='Well', how='left', suffixes=('', '_asset'))
+                                df_test['Lifting Method Name'] = df_test['Lifting Method Name'].fillna(df_test['Lifting Method'])
+                                # Hapus kolom bantuan jika ada
+                                if 'Lifting Method' in df_test.columns and 'Lifting Method' != 'Lifting Method Name':
+                                    df_test = df_test.drop(columns=['Lifting Method'])
+                        except Exception as e:
+                            st.warning(f"Gagal melakukan cross-reference Lifting Method: {e}")
                     
                     # --- FILTERING HIERARKI ---
                     df_filt = df_test.copy()
@@ -376,7 +383,6 @@ def main():
                     
                     # Tampilkan Detail Kelengkapan
                     with st.expander("Detail Tabel Kelengkapan"):
-                        # Warnai kolom basic saja untuk visualisasi
                         try:
                             st.dataframe(df_filt.style.apply(highlight_nulls, axis=1, subset=WELL_TEST_VALIDATE_BASIC), use_container_width=True)
                         except:
@@ -388,7 +394,7 @@ def main():
                     # Jalankan logic engineering
                     df_eng = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                     
-                    # Hitung Skor Kualitas Engineering (Persentase Pass dari TOTAL data)
+                    # Hitung Skor Kualitas Engineering
                     rule1_score = (df_eng['Rule1_Pass'] == True).sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     rule2_score = df_eng['Rule2_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     rule3_score = df_eng['Rule3_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
@@ -416,12 +422,16 @@ def main():
                             'Test Duration(Hours)', 'Oil (BOPD)', 'Water (BWPD)', 'Gas (MMSCFD)'
                         ]
                         
-                        # Warnai tabel error
-                        # Kita beri warna latar merah muda pada baris yang error
-                        st.dataframe(
-                            df_problems[display_cols],
-                            use_container_width=True
-                        )
+                        # Warnai tabel error dengan highlight merah muda
+                        try:
+                            st.dataframe(
+                                df_problems[display_cols].style.applymap(
+                                    lambda _: 'background-color: #ffcccc', subset=['Keterangan Error']
+                                ),
+                                use_container_width=True
+                            )
+                        except:
+                            st.dataframe(df_problems[display_cols], use_container_width=True)
                         
                         # Download Result (Hanya yang error)
                         csv_eng = df_problems.to_csv(index=False).encode('utf-8')
