@@ -16,7 +16,7 @@ st.set_page_config(
 # Batas maksimum sel untuk styling otomatis
 MAX_CELLS_FOR_STYLING = 15000 
 
-# Inisialisasi Session State (Masih ada untuk modul lain jika dibutuhkan)
+# Inisialisasi Session State
 if 'asset_register_df' not in st.session_state:
     st.session_state['asset_register_df'] = None
 
@@ -79,7 +79,6 @@ WELL_TEST_HIERARCHY = ["Regional", "Zona", "Working Area", "Asset Operation", "W
 
 # --- C. CONFIG MODUL 3: WELL PARAMETER (WELL ON) ---
 
-# Kolom Umum (Admin) yang pasti ada di setiap file input (Point B)
 WP_ADMIN_COLS = [
     "Regional", "Zona", "Working Area", "Asset Operation", "Entity ID",
     "Well", "Well Status", "Skin Status", "Lifting Method", "Reservoir Name",
@@ -87,7 +86,6 @@ WP_ADMIN_COLS = [
     "POP Date Actual", "Profile Summary"
 ]
 
-# Definisi Kolom Input (Point B) & Kolom Validasi Kelengkapan (Point D)
 WELL_PARAM_CONFIG = {
     "ESP": {
         "input_cols": WP_ADMIN_COLS + [
@@ -138,7 +136,7 @@ WELL_PARAM_CONFIG = {
             "Nozzle (Inch)", "Throat (Inch)", "Injection Fluid Pressure (Psig)",
             "Injection Point (ft-MD)", "PBHP (Psi)", "Remarks"
         ],
-        "conditional": {} # Tidak ada Dynamic/Static di list validasi HJP
+        "conditional": {} 
     },
     "HPU": {
         "input_cols": WP_ADMIN_COLS + [
@@ -194,7 +192,7 @@ WELL_PARAM_CONFIG = {
 WELL_PARAM_HIERARCHY = ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
 
 # ==========================================
-# 3. FUNGSI-FUNGSI LOGIKA (OPTIMIZED BACKEND)
+# 3. FUNGSI-FUNGSI LOGIKA (OPTIMIZED)
 # ==========================================
 
 @st.cache_data(ttl=3600)
@@ -241,7 +239,7 @@ def get_missing_details(df, target_cols):
     temp_df = df[valid_cols].replace('', pd.NA)
     return temp_df.isnull().sum().reset_index(name='Jumlah Kosong').rename(columns={'index': 'Nama Kolom'})
 
-# --- FUNGSI KHUSUS WELL TEST (VECTORIZED) ---
+# --- FUNGSI KHUSUS WELL TEST (IGNORE BLANK LOGIC) ---
 
 @st.cache_data
 def calculate_well_test_completeness(df):
@@ -264,18 +262,63 @@ def calculate_well_test_completeness(df):
 
 @st.cache_data
 def validate_engineering_rules(df_test, df_asset):
+    """
+    Validasi Well Test.
+    IGNORE BLANK: Hanya validasi nilai yang sudah terisi (notna).
+    """
     res = df_test.copy()
     num_cols = ["Test Duration(Hours)", "Oil (BOPD)", "Water (BWPD)", "Gas (MMSCFD)", "Condensate (BCPD)", "Fluid (BFPD)"]
-    for col in num_cols:
-        res[col] = pd.to_numeric(res[col], errors='coerce').fillna(0)
-
-    is_producing = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0) | (res["Fluid (BFPD)"] > 0)
-    res['Rule2_Pass'] = ~((res["Test Duration(Hours)"] > 0) & (~is_producing))
     
-    produces_something = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0)
-    res['Rule3_Pass'] = ~((produces_something) & (res["Test Duration(Hours)"] <= 0))
-    res['Rule4_Pass'] = (res[num_cols] >= 0).all(axis=1)
+    # Convert tanpa fillna(0) agar NaN tetap NaN
+    for col in num_cols:
+        res[col] = pd.to_numeric(res[col], errors='coerce')
 
+    # Rule 4: Terdapat Nilai Negatif
+    # Hanya cek jika value < 0 DAN tidak NaN
+    res['Rule4_Pass'] = True
+    for col in num_cols:
+        # Jika ada yang < 0 dan notna -> False
+        invalid = (res[col] < 0) & res[col].notna()
+        res.loc[invalid, 'Rule4_Pass'] = False
+
+    # Rule 2: Duration > 0 -> Produksi tidak boleh 0 semua
+    # Interpretasi Ignore Blank: Hanya fail jika semua kolom produksi yang TERISI bernilai 0.
+    # Jika kolom produksi NaN, itu bukan 0.
+    # Untuk simplifikasi vektor:
+    # Cek: (Duration > 0) & (Oil==0) & (Water==0)...
+    # Karena NaN == 0 adalah False, maka NaN tidak akan memicu error "Adalah 0".
+    # Ini sudah sesuai dengan prinsip "Ignore Blank".
+    
+    is_producing_check = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | \
+                         (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0) | \
+                         (res["Fluid (BFPD)"] > 0)
+                         
+    # Logic: Jika Duration > 0, minimal salah satu harus > 0.
+    # TAPI, jika data produksi kosong (NaN), maka (NaN > 0) False.
+    # Jika kita strict "Ignore Blank", baris dengan produksi kosong tidak boleh dibilang error "Produksi Nihil".
+    # Maka, kita harus pastikan kita hanya men-judge baris yang punya data produksi.
+    # Asumsi: Jika Duration ada, produksi juga harusnya ada. Tapi "Ignore Blank" override ini.
+    # Jadi: Error hanya jika (Duration > 0) AND (Oil=0) AND (Water=0)... (Semua yg dicek 0)
+    
+    # Dengan pandas, (NaN > 0) -> False.
+    # Jadi is_producing akan False jika semua NaN.
+    # Sehingga ~is_producing akan True (Error).
+    # Kita perlu mencegah error jika semua NaN.
+    
+    all_prod_nan = res[["Oil (BOPD)", "Water (BWPD)", "Gas (MMSCFD)", "Condensate (BCPD)", "Fluid (BFPD)"]].isna().all(axis=1)
+    
+    # Rule 2 Pass jika: (Duration <= 0) OR (Producing > 0) OR (Semua Data Produksi NaN)
+    res['Rule2_Pass'] = ~((res["Test Duration(Hours)"] > 0) & (~is_producing) & (~all_prod_nan))
+    
+    # Rule 3: Produksi > 0 -> Duration > 0
+    # Error jika: (Produksi > 0) AND (Duration <= 0) 
+    # Jika Duration NaN? (NaN <= 0) -> False.
+    # Jadi kalau Duration kosong, Rule 3 Pass (karena diabaikan).
+    produces_something = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | \
+                         (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0)
+    res['Rule3_Pass'] = ~((produces_something) & (res["Test Duration(Hours)"] <= 0))
+
+    # Rule 1: Frequency
     res['Rule1_Pass'] = True 
     check_rule1_active = False
     
@@ -284,13 +327,28 @@ def validate_engineering_rules(df_test, df_asset):
             check_rule1_active = True
             active_wells = set(df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)]['Well'].unique())
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
-            max_date = datetime.now() if res['Test Date'].dropna().empty else res['Test Date'].max()
+            
+            # Jika tanggal kosong -> NaT. NaT tidak akan match recent.
+            # "Ignore blank" -> Jika tanggal kosong, jangan cek frekuensi?
+            # Tapi tanggal adalah kunci validasi ini. 
+            # Mari kita set Pass jika NaT (Ignore blank)
+            
+            valid_date_mask = res['Test Date'].notna()
+            
+            if res['Test Date'].dropna().empty:
+                max_date = datetime.now()
+            else:
+                max_date = res['Test Date'].max()
+            
             cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0]
             recent_tests = set(res[res['Test Date'] >= cutoff_date]['Well'].unique())
             
             is_active_well = res['Well'].isin(active_wells)
             is_recent_test = res['Well'].isin(recent_tests)
-            res['Rule1_Pass'] = ~is_active_well | (is_active_well & is_recent_test)
+            
+            # Fail only if: Active Well AND (Not Recent) AND (Date Exists)
+            # Jika date not exist, we ignore.
+            res['Rule1_Pass'] = ~(is_active_well & ~is_recent_test & valid_date_mask)
 
     res['Keterangan Error'] = ""
     if check_rule1_active:
@@ -308,50 +366,38 @@ def validate_engineering_rules(df_test, df_asset):
 @st.cache_data
 def calculate_well_param_completeness(df, lift_type):
     """
-    Hitung kelengkapan sesuai aturan: Hanya untuk Active Well.
-    Kolom Dynamic/Static wajib bersyarat.
-    
-    Mengembalikan: None jika tidak ada active well, Float jika ada.
+    Hitung kelengkapan: Hanya untuk Active Well.
+    Returns: Float atau None (jika tidak ada data aktif).
     """
     if df.empty: return None
     
     config = WELL_PARAM_CONFIG[lift_type]
     base_cols = config['check_cols']
-    cond_map = config['conditional'] # Dictionary nama kolom Dynamic/Static
+    cond_map = config['conditional'] 
     
-    # 1. Filter hanya Active Well (Producing & Non Production)
-    if 'Well Status' not in df.columns:
-        return None
+    if 'Well Status' not in df.columns: return None
         
     df['Status_Norm'] = df['Well Status'].astype(str).str.strip()
-    
-    # Regex untuk menangkap kedua status active
     mask_active = df['Status_Norm'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
     df_active = df[mask_active].copy()
     
-    # Jika TIDAK ADA sumur aktif sama sekali di data ini, kembalikan None
-    if df_active.empty: 
-        return None 
+    if df_active.empty: return None 
 
     mask_producing = df_active['Status_Norm'].str.contains("Active Well Producing", case=False, na=False)
     mask_non_prod = df_active['Status_Norm'].str.contains("Active Well Non Production", case=False, na=False)
     
-    # 2. Hitung Basic Columns (Berlaku untuk SEMUA Active Well)
     total_expected = len(df_active) * len(base_cols)
     total_filled = df_active[base_cols].replace('', pd.NA).count().sum()
     
-    # 3. Hitung Conditional Columns
     if 'Dynamic' in cond_map:
         dyn_col = cond_map['Dynamic']
         if dyn_col in df_active.columns:
-            # Wajib untuk Producing
             total_expected += mask_producing.sum()
             total_filled += df_active.loc[mask_producing, dyn_col].replace('', pd.NA).notna().sum()
         
     if 'Static' in cond_map:
         stat_col = cond_map['Static']
         if stat_col in df_active.columns:
-            # Wajib untuk Non Production
             total_expected += mask_non_prod.sum()
             total_filled += df_active.loc[mask_non_prod, stat_col].replace('', pd.NA).notna().sum()
         
@@ -361,12 +407,12 @@ def calculate_well_param_completeness(df, lift_type):
 @st.cache_data
 def validate_well_parameter_rules(df_input, lift_type):
     """
-    Validasi Engineering Well Parameter (Tanpa Asset Register).
-    Menggunakan 'Well Status' dari file input.
+    Validasi Engineering Well Parameter.
+    1. Hanya Active Well.
+    2. Ignore Blank (notna check).
     """
     df_merged = df_input.copy()
     
-    # Pastikan kolom status ada
     if 'Well Status' not in df_merged.columns:
         df_merged['Keterangan Error'] = "CRITICAL: Kolom 'Well Status' tidak ditemukan."
         return df_merged
@@ -377,28 +423,31 @@ def validate_well_parameter_rules(df_input, lift_type):
 
     mask_producing = df_merged['Status_Norm'].str.contains("Active Well Producing", case=False, na=False)
     mask_non_prod = df_merged['Status_Norm'].str.contains("Active Well Non Production", case=False, na=False)
+    mask_active = mask_producing | mask_non_prod
 
-    # Helper Vectorized Checks
+    # Helper: Check Positive (Ignore Blank)
     def check_positive_vec(col_name, mask_rows):
         if col_name in df_merged.columns:
             val_col = pd.to_numeric(df_merged[col_name], errors='coerce')
-            # Error jika: (Value <= 0 OR NaN) AND Row Target
-            mask_invalid = (val_col <= 0) | (val_col.isna())
+            # Invalid if: (Val <= 0) AND (Val is NOT NaN) AND (Row is Target)
+            mask_invalid = (val_col <= 0) & (val_col.notna())
             target_invalid = mask_rows & mask_invalid
             if target_invalid.any():
                 df_merged.loc[target_invalid, 'Keterangan Error'] += f"{col_name} <= 0 | "
 
+    # Helper: Check Design Range (Ignore Blank)
     def check_design_range_vec():
         required = ["Pump Optimal Design Rate / Capacity Design (BFPD)", "Min BLPD (BFPD)", "Max BLPD (BFPD)"]
         if all(c in df_merged.columns for c in required):
-            des = pd.to_numeric(df_merged[required[0]], errors='coerce').fillna(0)
-            min_v = pd.to_numeric(df_merged[required[1]], errors='coerce').fillna(0)
-            max_v = pd.to_numeric(df_merged[required[2]], errors='coerce').fillna(0)
+            des = pd.to_numeric(df_merged[required[0]], errors='coerce')
+            min_v = pd.to_numeric(df_merged[required[1]], errors='coerce')
+            max_v = pd.to_numeric(df_merged[required[2]], errors='coerce')
             
-            # Logic: Min < Design < Max
+            # Check Only if ALL 3 values exist
+            data_exists = des.notna() & min_v.notna() & max_v.notna()
+            
             mask_invalid = ~((des > min_v) & (des < max_v))
-            # Cek hanya jika design rate > 0
-            mask_check = (des > 0) & mask_invalid
+            mask_check = data_exists & mask_invalid & mask_active
             if mask_check.any():
                 df_merged.loc[mask_check, 'Keterangan Error'] += "Design Rate Out of Range | "
 
@@ -407,13 +456,16 @@ def validate_well_parameter_rules(df_input, lift_type):
     if lift_type == "ESP":
         if "Pump Efficiency (%)" in df_merged.columns:
             eff = pd.to_numeric(df_merged["Pump Efficiency (%)"], errors='coerce')
-            mask_eff = eff > 100
+            # Check > 100 AND not NaN
+            mask_eff = (eff > 100) & (eff.notna()) & mask_active
             df_merged.loc[mask_eff, 'Keterangan Error'] += "Efficiency > 100% | "
         
-        # Kolom string/mix yang tidak boleh 0
         for c in ["Pump Type", "Serial Name", "Automatic Gas Handler", "Shroud", "Protector", "Sensor"]:
             if c in df_merged.columns:
-                mask_zero = (df_merged[c] == 0) | (df_merged[c].astype(str) == "0")
+                # Check 0 only if not NaN (Assuming blank string is NaN or empty)
+                # But here we handle string "0" or num 0.
+                # If cell is truly empty (NaN), (NaN == 0) is False. Safe.
+                mask_zero = ((df_merged[c] == 0) | (df_merged[c].astype(str) == "0")) & df_merged[c].notna() & mask_active
                 df_merged.loc[mask_zero, 'Keterangan Error'] += f"{c} is 0 | "
 
         cols_prod = [
@@ -456,7 +508,7 @@ def validate_well_parameter_rules(df_input, lift_type):
     elif lift_type == "HPU":
         for c in ["Pump Type", "Serial Name"]:
             if c in df_merged.columns:
-                mask_zero = (df_merged[c] == 0) | (df_merged[c].astype(str) == "0")
+                mask_zero = ((df_merged[c] == 0) | (df_merged[c].astype(str) == "0")) & df_merged[c].notna() & mask_active
                 df_merged.loc[mask_zero, 'Keterangan Error'] += f"{c} is 0 | "
         
         cols_prod = [
@@ -477,7 +529,7 @@ def validate_well_parameter_rules(df_input, lift_type):
     elif lift_type == "PCP":
         for c in ["Pump Type", "Serial Name"]:
             if c in df_merged.columns:
-                mask_zero = (df_merged[c] == 0) | (df_merged[c].astype(str) == "0")
+                mask_zero = ((df_merged[c] == 0) | (df_merged[c].astype(str) == "0")) & df_merged[c].notna() & mask_active
                 df_merged.loc[mask_zero, 'Keterangan Error'] += f"{c} is 0 | "
         
         cols_prod = [
@@ -498,7 +550,7 @@ def validate_well_parameter_rules(df_input, lift_type):
     elif lift_type == "SRP":
         for c in ["Pump Type", "Serial Name"]:
             if c in df_merged.columns:
-                mask_zero = (df_merged[c] == 0) | (df_merged[c].astype(str) == "0")
+                mask_zero = ((df_merged[c] == 0) | (df_merged[c].astype(str) == "0")) & df_merged[c].notna() & mask_active
                 df_merged.loc[mask_zero, 'Keterangan Error'] += f"{c} is 0 | "
 
         cols_prod = [
@@ -516,7 +568,6 @@ def validate_well_parameter_rules(df_input, lift_type):
         for c in cols_non: check_positive_vec(c, mask_non_prod)
         check_design_range_vec()
 
-    # Final Cleanup
     df_merged['Keterangan Error'] = df_merged['Keterangan Error'].str.rstrip(" | ")
     df_merged.loc[df_merged['Keterangan Error'] == "", 'Keterangan Error'] = "OK"
     return df_merged
@@ -699,11 +750,9 @@ def main():
                     
                     # 1. KELENGKAPAN (Optimized)
                     st.subheader("1. Validasi Kelengkapan Data")
-                    st.info("Pengecekan hanya untuk Active Well Producing & Active Well Non Production.")
                     
                     score = calculate_well_param_completeness(df_filt, lift_type)
                     
-                    # Logika tampilan pesan khusus jika tidak ada data aktif
                     if score is None:
                         st.warning(f"⚠️ **Lifting Method {lift_type} tidak terdapat pada area ini** (Tidak ada Active Well Producing/Non Production).")
                     else:
@@ -722,7 +771,7 @@ def main():
                                         sub_df = df_filt[df_filt[breakdown_col] == g]
                                         sub_score = calculate_well_param_completeness(sub_df, lift_type)
                                         
-                                        # Hanya tampilkan di tabel jika ada data aktif (score tidak None)
+                                        # Hanya tampilkan jika sub_score bukan None (ada data aktif)
                                         if sub_score is not None:
                                             breakdown_data.append({
                                                 breakdown_col: g, 
@@ -737,35 +786,44 @@ def main():
                                 except:
                                     st.warning("Gagal membuat breakdown otomatis.")
                     
-                    with st.expander("Detail Tabel Data"):
-                        display_dataframe_optimized(df_filt, target_check)
-                            
-                    missing_summary = get_missing_details(df_filt, target_check)
-                    if missing_summary['Jumlah Kosong'].sum() > 0:
-                        st.warning("Rincian Kekurangan Data (Semua Status):")
-                        st.dataframe(missing_summary[missing_summary['Jumlah Kosong'] > 0], use_container_width=False)
-                    
+                    # 2. VALIDASI ENGINEERING
                     st.subheader("2. Validasi Kaidah Engineering")
+                    st.info("Aturan: Validasi hanya dilakukan pada sumur aktif dan mengabaikan data kosong (Blank/NaN).")
                     
+                    # Gunakan fungsi validasi yang sudah diperbarui (hanya active wells)
                     df_eng_param = validate_well_parameter_rules(df_filt, lift_type)
                     
-                    pass_rate = (df_eng_param['Keterangan Error'] == "OK").sum() / len(df_eng_param) * 100 if len(df_eng_param) > 0 else 0
-                    st.metric("Engineering Compliance Rate", f"{pass_rate:.2f}%")
+                    # Hitung persentase HANYA pada active wells
+                    mask_active_eng = df_eng_param['Status_Norm'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
+                    df_active_eng = df_eng_param[mask_active_eng]
                     
-                    st.write("### 🚨 Data Bermasalah")
-                    df_problems = df_eng_param[df_eng_param['Keterangan Error'] != "OK"].copy()
-                    
-                    if df_problems.empty:
-                        st.success("✅ Tidak ditemukan pelanggaran.")
+                    if df_active_eng.empty:
+                        st.warning(f"⚠️ **Lifting Method {lift_type} tidak terdapat pada area ini** (Tidak ada Active Well Producing/Non Production untuk divalidasi).")
                     else:
-                        show_cols = ['Well', 'Well Status', 'Keterangan Error']
-                        show_cols += target_check[:5]
-                        show_cols = [c for c in show_cols if c in df_problems.columns]
+                        pass_count = (df_active_eng['Keterangan Error'] == "OK").sum()
+                        total_active = len(df_active_eng)
+                        pass_rate = (pass_count / total_active * 100) if total_active > 0 else 0
                         
-                        display_dataframe_optimized(df_problems[show_cols], ['Keterangan Error'], use_highlight=True)
+                        st.metric("Engineering Compliance Rate (Active Wells)", f"{pass_rate:.2f}%")
+                        
+                        st.write("### 🚨 Data Bermasalah")
+                        # Hanya ambil error yang BUKAN OK
+                        df_problems = df_active_eng[df_active_eng['Keterangan Error'] != "OK"].copy()
+                        
+                        if df_problems.empty:
+                            st.success("✅ Tidak ditemukan pelanggaran.")
+                        else:
+                            show_cols = ['Well', 'Well Status', 'Keterangan Error']
+                            show_cols += target_check[:5]
+                            show_cols = [c for c in show_cols if c in df_problems.columns]
                             
-                        csv_err = df_problems.to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 Download Data Bermasalah", csv_err, f"Engineering_Issues_{lift_type}.csv", "text/csv")
+                            display_dataframe_optimized(df_problems[show_cols], ['Keterangan Error'], use_highlight=True)
+                                
+                            csv_err = df_problems.to_csv(index=False).encode('utf-8')
+                            st.download_button("📥 Download Data Bermasalah", csv_err, f"Engineering_Issues_{lift_type}.csv", "text/csv")
+
+                    with st.expander("Detail Tabel Data Mentah"):
+                        display_dataframe_optimized(df_filt, target_check)
 
 if __name__ == "__main__":
     main()
