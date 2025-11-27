@@ -138,7 +138,8 @@ def calculate_well_test_completeness(df):
 def validate_engineering_rules(df_test, df_asset):
     """
     Melakukan validasi Engineering Rules 1-4.
-    Mengembalikan DataFrame dengan kolom tambahan hasil validasi (True/False).
+    Mengembalikan DataFrame dengan kolom tambahan hasil validasi (True/False)
+    dan kolom keterangan error.
     """
     res = df_test.copy()
     
@@ -149,7 +150,6 @@ def validate_engineering_rules(df_test, df_asset):
 
     # --- RULE 2: Jika Duration > 0, Produksi tidak boleh 0 semua ---
     # Logic: Jika Duration > 0 AND (Oil=0 & Water=0 & Gas=0 & Cond=0 & Fluid=0) -> FALSE (Invalid)
-    # Valid = NOT (Kondisi Invalid)
     is_producing = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0) | (res["Fluid (BFPD)"] > 0)
     res['Rule2_Pass'] = ~((res["Test Duration(Hours)"] > 0) & (~is_producing))
     
@@ -161,49 +161,68 @@ def validate_engineering_rules(df_test, df_asset):
     res['Rule4_Pass'] = (res[num_cols] >= 0).all(axis=1)
 
     # --- RULE 1: Frekuensi Test (Butuh data Asset Register) ---
-    res['Rule1_Pass'] = "N/A (No Asset Data)" # Default
+    res['Rule1_Pass'] = True # Default True jika tidak ada data aset (anggap tidak bisa divalidasi)
+    check_rule1_active = False # Flag apakah validasi ini berjalan
     
     if df_asset is not None and not df_asset.empty:
-        # 1. Ambil list Active Well Producing dari Asset Register
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
+            check_rule1_active = True
+            # 1. Ambil list Active Well Producing
             active_wells = df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)]['Well'].unique()
             
-            # 2. Cek Well Test Data
-            # Konversi tanggal
+            # 2. Cek Tanggal Test
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
             
-            # Kita perlu mengecek per baris apakah well ini "Patuh" jadwal
-            # Definisi: Well ini harus punya tes dalam 3 bulan terakhir dari data terbaru atau hari ini.
-            # Untuk simplifikasi tampilan per baris: Kita tandai TRUE jika well ini Active DAN tanggal tes ini masih dalam range wajar?
-            # TIDAK. Rule 1 lebih cocok sebagai metrik per SUMUR, bukan per BARIS tes.
-            # Namun karena permintaan output adalah "persentase baris data", kita asumsikan:
-            # Baris ini Valid jika: Well-nya Active DAN Gap antara tes ini dengan tes sebelumnya < 3 bulan?
-            # ATAU: Apakah Sumur di baris ini termasuk sumur yang patuh aturan?
+            # Tentukan Cutoff Date (Hari ini atau Max Date di data - 90 hari)
+            if res['Test Date'].dropna().empty:
+                max_date = datetime.now()
+            else:
+                max_date = res['Test Date'].max()
             
-            # Pendekatan: Kita hitung status kepatuhan per Sumur, lalu kita map ke baris data.
-            # Sumur Patuh = Punya tes dalam 90 hari terakhir (dari max date di file).
+            cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0]
             
-            max_date = res['Test Date'].max()
-            cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0] # 90 hari lalu
-            
-            # Cari sumur yang punya tes setelah cutoff_date
+            # Cari sumur yang memiliki setidaknya satu tes dalam rentang 90 hari terakhir
+            # Sesuai aturan: "Minimal terdapat data well test setiap 3 bulan sekali"
+            # Artinya jika dalam 3 bulan terakhir ada tes (berapapun jumlahnya), well tersebut PATUH.
             recent_tests = res[res['Test Date'] >= cutoff_date]['Well'].unique()
-            
-            # Logic:
-            # Jika Well TIDAK Active -> Rule 1 = True (Tidak wajib tes)
-            # Jika Well Active AND ada di recent_tests -> Rule 1 = True
-            # Jika Well Active AND TIDAK ada di recent_tests -> Rule 1 = False
             
             def check_rule1(row):
                 well_name = row['Well']
+                # Jika bukan Active Well, tidak wajib tes -> Lolos
                 if well_name not in active_wells:
-                    return True # Bukan Active Well, rule tidak berlaku (dianggap lolos)
+                    return True 
+                # Jika Active Well, harus ada di daftar recent_tests
                 if well_name in recent_tests:
-                    return True # Active dan baru dites
-                return False # Active tapi sudah lama tidak dites (Expired)
+                    return True 
+                # Active tapi tidak ada tes dalam 3 bulan terakhir -> Gagal
+                return False 
             
             res['Rule1_Pass'] = res.apply(check_rule1, axis=1)
 
+    # --- MEMBUAT KOLOM KETERANGAN ERROR ---
+    def generate_remarks(row):
+        errors = []
+        
+        # Cek Rule 1
+        if check_rule1_active and row['Rule1_Pass'] is False:
+            errors.append("⚠️ Active Well tidak ada test >3 bulan")
+            
+        # Cek Rule 2
+        if not row['Rule2_Pass']:
+            errors.append("⚠️ Durasi > 0 tapi Produksi Nihil")
+            
+        # Cek Rule 3
+        if not row['Rule3_Pass']:
+            errors.append("⚠️ Produksi Ada tapi Durasi 0/Kosong")
+            
+        # Cek Rule 4
+        if not row['Rule4_Pass']:
+            errors.append("⚠️ Terdapat Nilai Negatif")
+            
+        return " | ".join(errors) if errors else "OK"
+
+    res['Keterangan Error'] = res.apply(generate_remarks, axis=1)
+    
     return res
 
 # ==========================================
@@ -270,11 +289,23 @@ def main():
                     score = calculate_simple_completeness(df_filt, config['validate_columns'])
                     st.metric("Completeness", f"{score:.2f}%")
                     
-                    # Tabel
+                    # Tabel Utama
+                    st.markdown("##### Detail Data")
                     try:
                         st.dataframe(df_filt.style.apply(highlight_nulls, axis=1, subset=config['validate_columns']), use_container_width=True)
                     except:
                         st.dataframe(df_filt, use_container_width=True)
+
+                    # Tabel Ringkasan Data Kosong (Dikembalikan)
+                    missing_summary = get_missing_details(df_filt, config['validate_columns'])
+                    if missing_summary['Jumlah Kosong'].sum() > 0:
+                        st.warning("⚠️ **Rincian Kekurangan Data (Per Kolom Wajib):**")
+                        st.dataframe(
+                            missing_summary[missing_summary['Jumlah Kosong'] > 0], 
+                            use_container_width=False
+                        )
+                    else:
+                        st.success("✅ Semua kolom wajib telah terisi penuh.")
                         
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -357,36 +388,49 @@ def main():
                     # Jalankan logic engineering
                     df_eng = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                     
-                    # Hitung Skor Kualitas Engineering (Persentase Pass)
+                    # Hitung Skor Kualitas Engineering (Persentase Pass dari TOTAL data)
                     rule1_score = (df_eng['Rule1_Pass'] == True).sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     rule2_score = df_eng['Rule2_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     rule3_score = df_eng['Rule3_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     rule4_score = df_eng['Rule4_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
                     
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Rule 1 (Freq 3 Mo)", f"{rule1_score:.1f}%", help="Active Well wajib test tiap 3 bulan")
+                    c1.metric("Rule 1 (Freq 3 Mo)", f"{rule1_score:.1f}%", help="Active Well wajib test minimal sekali dalam 3 bulan terakhir")
                     c2.metric("Rule 2 (Non-Zero)", f"{rule2_score:.1f}%", help="Jika Durasi>0, Produksi gaboleh 0 semua")
                     c3.metric("Rule 3 (Duration)", f"{rule3_score:.1f}%", help="Jika Produksi>0, Durasi wajib >0")
                     c4.metric("Rule 4 (Positive)", f"{rule4_score:.1f}%", help="Tidak boleh ada angka negatif")
                     
-                    # Tampilkan Data Engineering dengan Flagging
-                    st.write(" **Data Hasil Engineering Check (False = Melanggar Aturan)**")
+                    # --- OUTPUT HANYA BARIS YANG BERMASALAH ---
+                    st.write("### 🚨 Data Bermasalah (Problematic Rows)")
+                    st.caption("Menampilkan baris data yang melanggar minimal satu aturan engineering.")
                     
-                    # Warnai baris yang False dengan warna merah muda
-                    def highlight_false(val):
-                        return 'background-color: #ffcccc' if val is False else ''
+                    # Filter: Ambil baris yang Keterangan Error-nya TIDAK "OK"
+                    df_problems = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
                     
-                    rule_cols = ['Rule1_Pass', 'Rule2_Pass', 'Rule3_Pass', 'Rule4_Pass']
-                    display_cols = ['Well', 'Test Date (dd/mm/yyyy)', 'Test Duration(Hours)', 'Oil (BOPD)', 'Water (BWPD)', 'Gas (MMSCFD)'] + rule_cols
-                    
-                    st.dataframe(
-                        df_eng[display_cols].style.applymap(highlight_false, subset=rule_cols),
-                        use_container_width=True
-                    )
-                    
-                    # Download Result
-                    csv_eng = df_eng.to_csv(index=False).encode('utf-8')
-                    st.download_button("Download Hasil Validasi Engineering (.csv)", csv_eng, "Engineering_Validation.csv", "text/csv")
+                    if df_problems.empty:
+                        st.success("✅ Tidak ditemukan pelanggaran kaidah engineering pada data ini.")
+                    else:
+                        # Tampilkan Kolom Penting + Keterangan Error
+                        display_cols = [
+                            'Well', 'Test Date (dd/mm/yyyy)', 'Keterangan Error',
+                            'Test Duration(Hours)', 'Oil (BOPD)', 'Water (BWPD)', 'Gas (MMSCFD)'
+                        ]
+                        
+                        # Warnai tabel error
+                        # Kita beri warna latar merah muda pada baris yang error
+                        st.dataframe(
+                            df_problems[display_cols],
+                            use_container_width=True
+                        )
+                        
+                        # Download Result (Hanya yang error)
+                        csv_eng = df_problems.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Data Bermasalah (.csv)", 
+                            data=csv_eng, 
+                            file_name="Engineering_Issues.csv", 
+                            mime="text/csv"
+                        )
 
             except Exception as e:
                 st.error(f"Gagal memproses Well Test: {e}")
