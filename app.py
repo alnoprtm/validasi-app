@@ -345,6 +345,7 @@ def validate_engineering_rules(df_test, df_asset):
 def calculate_well_param_completeness(df, lift_type):
     """
     Hitung kelengkapan sesuai aturan: Hanya untuk Active Well.
+    IGNORE baris dengan Lifting Method kosong/blank.
     Returns Dictionary dengan detail score, filled, expected, DAN jumlah baris AKTIF saja.
     """
     if df.empty: return None
@@ -354,9 +355,19 @@ def calculate_well_param_completeness(df, lift_type):
     cond_map = config['conditional'] 
     
     if 'Well Status' not in df.columns: return None
+    
+    # 1. Filter hanya Active Well (Producing & Non Production)
     df['Status_Norm'] = df['Well Status'].astype(str).str.strip()
     mask_active = df['Status_Norm'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
     df_active = df[mask_active].copy()
+    
+    # 2. Filter Lifting Method (Hanya yang TIDAK BLANK)
+    if 'Lifting Method' in df_active.columns:
+        # Convert ke string, strip whitespace
+        lm_str = df_active['Lifting Method'].astype(str).str.strip()
+        # Exclude 'nan', 'NaN', 'None', dan empty string ''
+        mask_lift = (~lm_str.isin(['nan', 'NaN', 'None', '']))
+        df_active = df_active[mask_lift]
     
     if df_active.empty: return None 
 
@@ -386,7 +397,7 @@ def calculate_well_param_completeness(df, lift_type):
         "score": score,
         "filled": total_filled,
         "expected": total_expected,
-        "active_rows": len(df_active) # Hanya hitung baris aktif
+        "active_rows": len(df_active) # Hanya hitung baris aktif yang Lifting Method-nya terisi
     }
 
 @st.cache_data
