@@ -11,6 +11,11 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- PERBAIKAN ERROR ---
+# Menaikkan batas limit styling pandas agar bisa mewarnai tabel besar
+# Kita set ke 5 Juta sel (cukup untuk data yang sangat besar)
+pd.set_option("styler.render.max_elements", 5000000)
+
 # ==========================================
 # 2. DEFINISI ATURAN & SKEMA (DATABASE LOGIC)
 # ==========================================
@@ -130,14 +135,11 @@ def main():
     # --- BAGIAN 2: PROSES DATA ---
     if uploaded_file is not None:
         try:
-            # Membaca Excel (otomatis menjadikan baris pertama sebagai header)
+            # Membaca Excel
             df = pd.read_excel(uploaded_file)
-            
-            # Membersihkan nama kolom (menghapus spasi di awal/akhir nama kolom excel)
-            df.columns = df.columns.str.strip()
+            df.columns = df.columns.str.strip() # Bersihkan spasi di header
             
             # --- VALIDASI KOLOM (Header Check) ---
-            # Cek apakah kolom di Excel user sesuai dengan Config
             missing_cols = [col for col in required_cols if col not in df.columns]
             
             if missing_cols:
@@ -146,10 +148,9 @@ def main():
                 st.warning("Mohon perbaiki nama kolom di Excel Anda agar sesuai dengan daftar 'Kolom Wajib' di atas.")
             
             else:
-                # Jika kolom sesuai, lanjut proses
                 st.success(f"✅ File berhasil dibaca: {len(df)} baris data.")
                 
-                # Bersihkan baris kosong
+                # Bersihkan baris yang sepenuhnya kosong
                 df = df.dropna(how='all')
                 
                 st.markdown("---")
@@ -160,10 +161,8 @@ def main():
                 cols_filter = st.columns(len(hierarchy_cols))
                 
                 for idx, col_name in enumerate(hierarchy_cols):
-                    # Konversi ke string agar aman saat filter dan replace nan dengan string kosong
+                    # Konversi ke string & replace nan
                     df_filtered[col_name] = df_filtered[col_name].astype(str).replace('nan', '')
-                    
-                    # Sorting opsi filter
                     unique_values = ["Semua"] + sorted(list(df_filtered[col_name].unique()))
                     
                     with cols_filter[idx]:
@@ -198,11 +197,18 @@ def main():
                 # --- BAGIAN 5: TABEL DETAIL & DOWNLOAD ---
                 st.markdown("#### Detail Data (Terfilter)")
                 
-                # Tampilkan tabel hasil dengan highlight
-                st.dataframe(
-                    df_filtered.style.apply(highlight_nulls, axis=1, subset=validate_cols),
-                    use_container_width=True
-                )
+                # LOGIKA UNTUK MENANGANI DATA BESAR
+                # Jika data terlalu besar (>100.000 baris), styling bisa membuat lemot.
+                # Tapi karena kita sudah set option di atas, seharusnya aman.
+                try:
+                    st.dataframe(
+                        df_filtered.style.apply(highlight_nulls, axis=1, subset=validate_cols),
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    # Fallback jika masih error: Tampilkan tabel tanpa warna
+                    st.warning("⚠️ Data terlalu besar untuk pewarnaan (highlight). Menampilkan tabel standar.")
+                    st.dataframe(df_filtered, use_container_width=True)
                 
                 # Ringkasan data kosong
                 missing_summary = get_missing_details(df_filtered, validate_cols)
