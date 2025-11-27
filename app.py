@@ -154,12 +154,12 @@ DAILY_PROD_CONFIG = {
     "Working Area Production": {
         "columns": ["Regional", "Zona", "Working Area", "EntityID", "Production Date", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)"],
         "validate": ["Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)"],
-        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
+        "hierarchy": ["Regional", "Zona", "Working Area"]
     },
     "Asset Operation Production": {
         "columns": ["Regional", "Zona", "Working Area", "Asset Operation", "EntityID", "Production Date", "Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond. Form. (BCPD)", "Cond. Plant. (BCPD)"],
         "validate": ["Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond. Form. (BCPD)", "Cond. Plant. (BCPD)"],
-        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
+        "hierarchy": ["Regional", "Zona", "Working Area", "Asset Operation"]
     },
     "Well Production": {
         "columns": ["No", "Regional", "Zona", "Working Area", "Asset Operation", "Well", "Entity ID", "Production Date", "Flowing Time", "Down Time", "Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond.Form. (BCPD)"],
@@ -266,21 +266,27 @@ def validate_engineering_rules(df_test, df_asset):
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
             check_rule1_active = True
             asset_active = df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)].copy()
+            
+            # Hirarki Check Logic (Updated)
             hierarchy_cols = ["Regional", "Zona", "Working Area", "Asset Operation"]
             cols_exist_test = all(col in res.columns for col in hierarchy_cols)
             cols_exist_asset = all(col in asset_active.columns for col in hierarchy_cols)
             
             if cols_exist_test and cols_exist_asset:
                 test_scope = res[hierarchy_cols].drop_duplicates()
+                # Filter Asset Wells that belong to the uploaded hierarchy
                 asset_in_scope = asset_active.merge(test_scope, on=hierarchy_cols, how='inner')
+                
                 test_wells_set = set(res['Well'].unique())
                 missing_mask = ~asset_in_scope['Well'].isin(test_wells_set)
                 missing_wells_df = asset_in_scope[missing_mask].copy()
                 active_prod_wells = set(asset_active['Well'].unique())
             else:
+                # Fallback if hierarchy columns missing
                 active_prod_wells = set(asset_active['Well'].unique())
                 test_wells_set = set(res['Well'].unique())
-                missing_wells_df = pd.DataFrame(columns=asset_active.columns)
+                # Cannot determine scope accurately, so return empty missing
+                missing_wells_df = pd.DataFrame()
 
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
             active_wells_in_test = test_wells_set.intersection(active_prod_wells)
@@ -463,151 +469,92 @@ def calculate_event_al_completeness(df):
 # --- FUNGSI KHUSUS DAILY PRODUCTION ---
 @st.cache_data
 def validate_daily_prod_engineering(df_well, df_asset_reg):
-    """
-    Validasi Daily Prod - Well Production
-    """
     res = df_well.copy()
-    
-    # Convert columns to numeric
     num_cols = ["Flowing Time", "Down Time", "Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond.Form. (BCPD)"]
     for c in num_cols:
         if c in res.columns: res[c] = pd.to_numeric(res[c], errors='coerce').fillna(0)
-    
     if "Production Date" in res.columns:
         res['Production Date'] = pd.to_datetime(res['Production Date'], errors='coerce')
-
-    # Init Error Flags
+    
     res['Error_Negative'] = False
     res['Error_Flow0_ProdNot0'] = False
     res['Error_FlowGt0_Prod0'] = False
     
-    # Rule 3: Non Negative
     for c in num_cols:
-        if c in res.columns:
-            res.loc[res[c] < 0, 'Error_Negative'] = True
+        if c in res.columns: res.loc[res[c] < 0, 'Error_Negative'] = True
             
-    # Rule 4: Flowing Time = 0 -> All Prod must be 0
     prod_cols = ["Total Oil (BOPD)", "Oil (BOPD)", "Gas (MMSCFD)", "Water (BWPD)", "Cond.Form. (BCPD)"]
     existing_prod_cols = [c for c in prod_cols if c in res.columns]
-    
     if "Flowing Time" in res.columns:
         mask_flow0 = res["Flowing Time"] == 0
-        # Check if any prod col is != 0
         prod_not_zero = (res[existing_prod_cols] != 0).any(axis=1)
         res.loc[mask_flow0 & prod_not_zero, 'Error_Flow0_ProdNot0'] = True
-        
-        # Rule 5: Flowing Time > 0 -> At least one Prod > 0
         mask_flow_gt0 = res["Flowing Time"] > 0
-        # Check if ALL prod cols are 0 (or close to 0)
         prod_all_zero = (res[existing_prod_cols] == 0).all(axis=1)
         res.loc[mask_flow_gt0 & prod_all_zero, 'Error_FlowGt0_Prod0'] = True
 
-    # Rule 1 & 2: Missing Wells & Daily Gap
     missing_wells_df = pd.DataFrame()
     res['Error_Daily_Gap'] = False
     
     if df_asset_reg is not None:
-        # Filter Active Wells
         active_mask = df_asset_reg['Well Status'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
         asset_active = df_asset_reg[active_mask].copy()
-        
-        # Hirarki Check
         hier = ["Regional", "Zona", "Working Area", "Asset Operation"]
         if all(c in res.columns for c in hier) and all(c in asset_active.columns for c in hier):
             test_scope = res[hier].drop_duplicates()
             asset_in_scope = asset_active.merge(test_scope, on=hier, how='inner')
-            
-            # Missing Well
             prod_wells = set(res['Well'].unique())
             missing_mask = ~asset_in_scope['Well'].isin(prod_wells)
             missing_wells_df = asset_in_scope[missing_mask].copy()
-            
-            # Daily Gap Check
             if not res.empty and "Production Date" in res.columns:
                 min_date = res['Production Date'].min()
                 max_date = res['Production Date'].max()
-                
                 if pd.notna(min_date) and pd.notna(max_date):
                     all_dates = pd.date_range(start=min_date, end=max_date)
-                    
                     well_dates = res.groupby('Well')['Production Date'].apply(set)
-                    
                     active_wells_in_prod = set(asset_in_scope['Well'].unique()).intersection(prod_wells)
-                    
                     gap_wells = []
                     expected_dates_set = set(all_dates)
-                    
                     for w in active_wells_in_prod:
                         wd = well_dates.get(w, set())
-                        if not expected_dates_set.issubset(wd):
-                            gap_wells.append(w)
-                            
+                        if not expected_dates_set.issubset(wd): gap_wells.append(w)
                     res.loc[res['Well'].isin(gap_wells), 'Error_Daily_Gap'] = True
 
-    # Build Error Msg
     res['Keterangan Error'] = ""
     res.loc[res['Error_Negative'], 'Keterangan Error'] += "⚠️ Nilai Negatif | "
     res.loc[res['Error_Flow0_ProdNot0'], 'Keterangan Error'] += "⚠️ Flow=0 tapi Produksi Ada | "
     res.loc[res['Error_FlowGt0_Prod0'], 'Keterangan Error'] += "⚠️ Flow>0 tapi Produksi Nihil | "
     res.loc[res['Error_Daily_Gap'], 'Keterangan Error'] += "⚠️ Data Harian Tidak Lengkap | "
-    
     res['Keterangan Error'] = res['Keterangan Error'].str.rstrip(" | ")
     res.loc[res['Keterangan Error'] == "", 'Keterangan Error'] = "OK"
-    
     return res, missing_wells_df
 
 @st.cache_data
 def check_production_reconciliation(df_well, df_asset):
     if df_well is None or df_asset is None: return None
-    
     hier = ["Regional", "Zona", "Working Area", "Asset Operation", "Production Date"]
-    
     for c in hier:
         if c not in df_well.columns or c not in df_asset.columns: return None
-        
-    # Normalize Col Names for aggregation
-    well_map = {
-        "Total Oil (BOPD)": "Total Oil", 
-        "Oil (BOPD)": "Oil", 
-        "Gas (MMSCFD)": "Gas", 
-        "Cond.Form. (BCPD)": "Condensate"
-    }
-    asset_map = {
-        "Total Oil (BOPD)": "Total Oil", 
-        "Oil (BOPD)": "Oil", 
-        "Gas (MMSCFD)": "Gas", 
-        "Cond. Form. (BCPD)": "Condensate" 
-    }
-    
-    # Ensure numeric
+    well_map = {"Total Oil (BOPD)": "Total Oil", "Oil (BOPD)": "Oil", "Gas (MMSCFD)": "Gas", "Cond.Form. (BCPD)": "Condensate"}
+    asset_map = {"Total Oil (BOPD)": "Total Oil", "Oil (BOPD)": "Oil", "Gas (MMSCFD)": "Gas", "Cond. Form. (BCPD)": "Condensate"}
     for col in well_map.keys():
         if col in df_well.columns: df_well[col] = pd.to_numeric(df_well[col], errors='coerce').fillna(0)
     for col in asset_map.keys():
         if col in df_asset.columns: df_asset[col] = pd.to_numeric(df_asset[col], errors='coerce').fillna(0)
-
-    # Aggregation
     well_agg = df_well.groupby(hier)[list(well_map.keys())].sum().reset_index()
     well_agg = well_agg.rename(columns=well_map)
-    
     asset_sub = df_asset[hier + list(asset_map.keys())].copy()
     asset_sub = asset_sub.rename(columns=asset_map)
-    
-    # Merge
     merged = pd.merge(well_agg, asset_sub, on=hier, suffixes=('_Well', '_Asset'), how='outer')
-    
-    # Calculate Diff
     metrics = ["Total Oil", "Oil", "Gas", "Condensate"]
     for m in metrics:
         merged[f"{m}_Well"] = merged[f"{m}_Well"].fillna(0)
         merged[f"{m}_Asset"] = merged[f"{m}_Asset"].fillna(0)
         merged[f"Diff_{m}"] = merged[f"{m}_Well"] - merged[f"{m}_Asset"]
-        
-    # Identify Mismatch (Allow small float tolerance)
     tol = 0.01
     merged['Status'] = 'Match'
     mismatch_mask = (merged[[f"Diff_{m}" for m in metrics]].abs() > tol).any(axis=1)
     merged.loc[mismatch_mask, 'Status'] = 'Mismatch'
-    
     return merged
 
 # ==========================================
@@ -616,14 +563,8 @@ def check_production_reconciliation(df_well, df_asset):
 
 def main():
     st.sidebar.title("🛢️ Menu Aplikasi")
+    main_menu = st.sidebar.selectbox("Pilih Modul Validasi:", ["Asset Register", "Production Well Test", "Well Parameter (Well On)", "Event Artificial Lift (Well Off)", "Daily Production Data"])
     
-    main_menu = st.sidebar.selectbox(
-        "Pilih Modul Validasi:", 
-        ["Asset Register", "Production Well Test", "Well Parameter (Well On)", 
-         "Event Artificial Lift (Well Off)", "Daily Production Data"]
-    )
-    
-    # --- MODUL 1: ASSET REGISTER ---
     if main_menu == "Asset Register":
         st.title("📂 Modul 1: Asset Register")
         sub_menu = st.sidebar.radio("Sub-Menu Asset:", list(ASSET_CONFIG.keys()))
@@ -635,26 +576,39 @@ def main():
                 if sub_menu == "Well":
                     st.session_state['asset_register_df'] = df
                     st.toast("Data Well tersimpan!", icon="💾")
-                score = calculate_simple_completeness(df, config['validate_columns'])
+                df_filt = df.copy()
+                cols_filt = st.columns(len(config['filter_hierarchy']))
+                for i, col in enumerate(config['filter_hierarchy']):
+                    df_filt[col] = df_filt[col].astype(str).replace('nan', '')
+                    opts = ["Semua"] + sorted(df_filt[col].unique().tolist())
+                    sel = cols_filt[i].selectbox(col, opts, key=f"ar_{col}")
+                    if sel != "Semua": df_filt = df_filt[df_filt[col] == sel]
+                score = calculate_simple_completeness(df_filt, config['validate_columns'])
                 st.metric("Completeness", f"{score:.2f}%")
-                display_dataframe_optimized(df, config['validate_columns'])
+                display_dataframe_optimized(df_filt, config['validate_columns'])
 
-    # --- MODUL 2: PRODUCTION WELL TEST ---
     elif main_menu == "Production Well Test":
         st.title("🧪 Modul 2: Production Well Test")
         uploaded_test = st.file_uploader("Upload Excel Well Test", type=['xlsx', 'xls'])
         if uploaded_test:
             df_test = load_excel_file(uploaded_test)
             if df_test is not None:
+                df_filt = df_test.copy()
+                cols_filt = st.columns(len(WELL_TEST_HIERARCHY))
+                for i, col in enumerate(WELL_TEST_HIERARCHY):
+                    if col in df_filt.columns:
+                        df_filt[col] = df_filt[col].astype(str).replace('nan', '')
+                        opts = ["Semua"] + sorted(df_filt[col].unique().tolist())
+                        sel = cols_filt[i].selectbox(col, opts, key=f"wt_{col}")
+                        if sel != "Semua": df_filt = df_filt[df_filt[col] == sel]
+                
                 st.subheader("2. Validasi Kaidah Engineering")
-                df_eng, missing_wells_df = validate_engineering_rules(df_test, st.session_state['asset_register_df'])
+                df_eng, missing_wells_df = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                 if not missing_wells_df.empty:
                     st.warning(f"⚠️ Ditemukan **{len(missing_wells_df)} Sumur Active Producing** yang tidak memiliki data test:")
                     st.dataframe(missing_wells_df, use_container_width=True)
-                
                 st.write("### 🚨 Data Bermasalah")
                 df_problems = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
-                
                 if df_problems.empty:
                     st.success("✅ Tidak ditemukan pelanggaran.")
                 else:
@@ -666,7 +620,6 @@ def main():
                     csv_err = df_display.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Data Bermasalah", csv_err, "Engineering_Issues.csv", "text/csv")
 
-    # --- MODUL 3: WELL PARAMETER (WELL ON) ---
     elif main_menu == "Well Parameter (Well On)":
         st.title("⚙️ Modul 3: Well Parameter (Well On)")
         lift_type = st.sidebar.radio("Pilih Artificial Lift:", list(WELL_PARAM_CONFIG.keys()))
@@ -677,6 +630,7 @@ def main():
                 st.subheader("Filter Data")
                 df_filt = df_param.copy()
                 cols_filt = st.columns(len(WELL_PARAM_HIERARCHY))
+                last_selected_level = -1
                 for i, col in enumerate(WELL_PARAM_HIERARCHY):
                     if col in df_filt.columns:
                         df_filt[col] = df_filt[col].astype(str).replace('nan', '')
@@ -684,39 +638,76 @@ def main():
                         sel = cols_filt[i].selectbox(col, opts, key=f"wp_{col}")
                         if sel != "Semua":
                             df_filt = df_filt[df_filt[col] == sel]
+                            last_selected_level = i
                     else:
                         cols_filt[i].text(f"{col} (N/A)")
                 
                 res_total = calculate_well_param_completeness(df_filt, lift_type)
-                if res_total:
+                if res_total is None:
+                    st.warning(f"⚠️ **Lifting Method {lift_type} tidak terdapat pada area ini**")
+                else:
                     st.metric("Total Completeness (Active Wells)", f"{res_total['score']:.2f}%")
+                    next_level_idx = last_selected_level + 1
+                    if next_level_idx < len(WELL_PARAM_HIERARCHY):
+                        breakdown_col = WELL_PARAM_HIERARCHY[next_level_idx]
+                        if breakdown_col in df_filt.columns:
+                            st.markdown(f"**Breakdown Completeness per {breakdown_col}:**")
+                            try:
+                                groups = df_filt[breakdown_col].unique()
+                                breakdown_data = []
+                                for g in groups:
+                                    sub_df = df_filt[df_filt[breakdown_col] == g]
+                                    sub_res = calculate_well_param_completeness(sub_df, lift_type)
+                                    if sub_res is not None:
+                                        breakdown_data.append({breakdown_col: g, "Completeness (%)": sub_res['score'], "Sel Terisi": sub_res['filled'], "Total Sel": sub_res['expected'], "Jumlah Baris": sub_res['active_rows']})
+                                if breakdown_data: st.dataframe(pd.DataFrame(breakdown_data).sort_values("Completeness (%)"), use_container_width=True)
+                                else: st.info(f"Tidak ada {breakdown_col} yang memiliki sumur aktif untuk metode ini.")
+                            except: st.warning("Gagal membuat breakdown otomatis.")
                 
                 df_eng_param = validate_well_parameter_rules(df_filt, lift_type)
                 st.write("### 🚨 Data Bermasalah")
                 df_problems = df_eng_param[df_eng_param['Keterangan Error'] != "OK"].copy()
-                
-                if df_problems.empty:
-                    st.success("✅ Tidak ditemukan pelanggaran.")
+                if df_problems.empty: st.success("✅ Tidak ditemukan pelanggaran.")
                 else:
-                    if 'Status_Norm' in df_problems.columns:
-                        df_problems = df_problems.drop(columns=['Status_Norm'])
+                    if 'Status_Norm' in df_problems.columns: df_problems = df_problems.drop(columns=['Status_Norm'])
                     cols = ['Keterangan Error'] + [c for c in df_problems.columns if c != 'Keterangan Error']
                     df_display = df_problems[cols]
                     display_dataframe_optimized(df_display, ['Keterangan Error'], use_highlight=True)
                     csv_err = df_display.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Data Bermasalah", csv_err, f"Engineering_Issues_{lift_type}.csv", "text/csv")
 
-    # --- MODUL 4: EVENT ARTIFICIAL LIFT (WELL OFF) ---
     elif main_menu == "Event Artificial Lift (Well Off)":
         st.title("📉 Modul 4: Event Artificial Lift (Well Off)")
         uploaded_event = st.file_uploader("Upload Excel Event AL", type=['xlsx', 'xls'])
         if uploaded_event:
             df_event = load_excel_file(uploaded_event)
             if df_event is not None:
-                res_total = calculate_event_al_completeness(df_event)
+                if "Event Start Time (dd/MM/yyy HH:mm)" in df_event.columns:
+                    df_event['EventDate'] = pd.to_datetime(df_event["Event Start Time (dd/MM/yyy HH:mm)"], format='%d/%m/%Y %H:%M', errors='coerce')
+                    df_event['Periode'] = df_event['EventDate'].dt.strftime('%Y-%m')
+                
+                df_filt = df_event.copy()
+                cols_filt = st.columns(len(EVENT_AL_HIERARCHY))
+                for i, col in enumerate(EVENT_AL_HIERARCHY):
+                    if col in df_filt.columns:
+                        df_filt[col] = df_filt[col].astype(str).replace('nan', '')
+                        opts = ["Semua"] + sorted(df_filt[col].unique().tolist())
+                        sel = cols_filt[i].selectbox(col, opts, key=f"eal_{col}")
+                        if sel != "Semua": df_filt = df_filt[df_filt[col] == sel]
+                
+                res_total = calculate_event_al_completeness(df_filt)
                 st.metric("Completeness", f"{res_total['score']:.2f}%")
+                if 'Periode' in df_filt.columns:
+                    st.markdown("**Breakdown Completeness per Bulan/Tahun:**")
+                    period_groups = [p for p in df_filt['Periode'].unique() if str(p) != 'nan']
+                    period_groups.sort()
+                    period_data = []
+                    for p in period_groups:
+                        sub_df = df_filt[df_filt['Periode'] == p]
+                        sub_res = calculate_event_al_completeness(sub_df)
+                        period_data.append({"Periode": p, "Completeness (%)": sub_res['score'], "Sel Terisi": sub_res['filled'], "Total Sel": sub_res['expected'], "Jumlah Data": len(sub_df)})
+                    if period_data: st.dataframe(pd.DataFrame(period_data), use_container_width=True)
 
-    # --- MODUL 5: DAILY PRODUCTION DATA ---
     elif main_menu == "Daily Production Data":
         st.title("📊 Modul 5: Daily Production Data")
         sub_menu = st.sidebar.radio("Sub-Menu:", ["Working Area Production", "Asset Operation Production", "Well Production", "Production Reconciliation"])
@@ -732,7 +723,6 @@ def main():
                     elif sub_menu == "Asset Operation Production":
                         st.session_state['daily_asset_prod_df'] = df_prod
                     
-                    st.subheader("Filter Data")
                     df_filt = df_prod.copy()
                     cols_filt = st.columns(len(config['hierarchy']))
                     for i, col in enumerate(config['hierarchy']):
@@ -740,12 +730,8 @@ def main():
                             df_filt[col] = df_filt[col].astype(str).replace('nan', '')
                             opts = ["Semua"] + sorted(df_filt[col].unique().tolist())
                             sel = cols_filt[i].selectbox(col, opts, key=f"dp_{col}")
-                            if sel != "Semua":
-                                df_filt = df_filt[df_filt[col] == sel]
-                        else:
-                            cols_filt[i].text(f"{col} (N/A)")
+                            if sel != "Semua": df_filt = df_filt[df_filt[col] == sel]
                     
-                    st.subheader("1. Validasi Kelengkapan Data")
                     score = calculate_simple_completeness(df_filt, config['validate'])
                     st.metric("Completeness", f"{score:.2f}%")
                     
@@ -753,12 +739,11 @@ def main():
                         st.subheader("2. Validasi Kaidah Engineering")
                         df_eng, missing_wells = validate_daily_prod_engineering(df_filt, st.session_state['asset_register_df'])
                         if not missing_wells.empty:
-                            st.warning(f"⚠️ Ditemukan **{len(missing_wells)} Sumur Active** yang tidak memiliki data produksi harian di hirarki ini:")
+                            st.warning(f"⚠️ Ditemukan **{len(missing_wells)} Sumur Active** yang tidak memiliki data produksi harian:")
                             st.dataframe(missing_wells, use_container_width=True)
                         st.write("### 🚨 Data Bermasalah")
                         df_probs = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
-                        if df_probs.empty:
-                            st.success("✅ Tidak ditemukan pelanggaran rules.")
+                        if df_probs.empty: st.success("✅ Tidak ditemukan pelanggaran rules.")
                         else:
                             helpers = ['Error_Negative', 'Error_Flow0_ProdNot0', 'Error_FlowGt0_Prod0', 'Error_Daily_Gap']
                             df_display = df_probs.drop(columns=[c for c in helpers if c in df_probs.columns])
@@ -771,47 +756,33 @@ def main():
                     with st.expander("Detail Data Mentah"):
                         display_dataframe_optimized(df_filt, config['validate'])
 
-        else: # Production Reconciliation
+        else:
             st.subheader("⚖️ Production Reconciliation")
             df_well = st.session_state['daily_well_prod_df']
             df_asset = st.session_state['daily_asset_prod_df']
-            
-            if df_well is None or df_asset is None:
-                st.warning("⚠️ Harap upload file 'Well Production' dan 'Asset Operation Production' di sub-menu masing-masing terlebih dahulu.")
+            if df_well is None or df_asset is None: st.warning("⚠️ Harap upload file 'Well Production' dan 'Asset Operation Production'.")
             else:
                 recon_df = check_production_reconciliation(df_well, df_asset)
-                if recon_df is None:
-                    st.error("Gagal melakukan rekonsiliasi. Pastikan kolom Hirarki dan Production Date ada di kedua file.")
+                if recon_df is None: st.error("Gagal melakukan rekonsiliasi.")
                 else:
-                    st.subheader("Filter Data Rekonsiliasi")
                     recon_filt = recon_df.copy()
-                    recon_hier = ["Regional", "Zona", "Working Area", "Asset Operation", "Well"] # Added Well
+                    recon_hier = ["Regional", "Zona", "Working Area", "Asset Operation"]
                     cols_filt = st.columns(len(recon_hier))
                     for i, col in enumerate(recon_hier):
                         if col in recon_filt.columns:
                             recon_filt[col] = recon_filt[col].astype(str).replace('nan', '')
                             opts = ["Semua"] + sorted(recon_filt[col].unique().tolist())
                             sel = cols_filt[i].selectbox(col, opts, key=f"recon_{col}")
-                            if sel != "Semua":
-                                recon_filt = recon_filt[recon_filt[col] == sel]
-                        else:
-                            cols_filt[i].text(f"{col} (N/A)")
+                            if sel != "Semua": recon_filt = recon_filt[recon_filt[col] == sel]
                     
-                    total_rows = len(recon_filt)
                     mismatch_rows = len(recon_filt[recon_filt['Status'] == 'Mismatch'])
-                    match_rows = total_rows - mismatch_rows
-                    c1, c2 = st.columns(2)
-                    c1.metric("Data Match", f"{match_rows} Baris", delta="OK")
-                    c2.metric("Data Mismatch", f"{mismatch_rows} Baris", delta_color="inverse")
-                    st.write("### 📋 Detail Rekonsiliasi")
+                    st.metric("Data Mismatch", f"{mismatch_rows} Baris")
                     df_show = recon_filt.sort_values('Status', ascending=False)
                     def color_status(val):
                         color = '#ffcccc' if val == 'Mismatch' else '#ccffcc'
                         return f'background-color: {color}'
-                    try:
-                        st.dataframe(df_show.style.applymap(color_status, subset=['Status']), use_container_width=True)
-                    except:
-                        st.dataframe(df_show, use_container_width=True)
+                    try: st.dataframe(df_show.style.applymap(color_status, subset=['Status']), use_container_width=True)
+                    except: st.dataframe(df_show, use_container_width=True)
                     csv_recon = recon_filt.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 Download Hasil Rekonsiliasi", csv_recon, "Production_Reconciliation.csv", "text/csv")
 
