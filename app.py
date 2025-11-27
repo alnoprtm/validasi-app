@@ -293,6 +293,7 @@ def validate_engineering_rules(df_test, df_asset):
     for col in num_cols:
         res[col] = pd.to_numeric(res[col], errors='coerce')
 
+    # Basic Rules 2, 3, 4
     res['Rule4_Pass'] = True
     for col in num_cols:
         invalid = (res[col] < 0) & res[col].notna()
@@ -308,36 +309,76 @@ def validate_engineering_rules(df_test, df_asset):
                          (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0)
     res['Rule3_Pass'] = ~((produces_something) & (res["Test Duration(Hours)"] <= 0))
 
+    # Rule 1: Frequency Check (Revised)
     res['Rule1_Pass'] = True 
+    missing_wells = [] # List for missing wells
+    
     check_rule1_active = False
     
     if df_asset is not None and not df_asset.empty:
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
             check_rule1_active = True
-            active_wells = set(df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)]['Well'].unique())
+            
+            # 1. Get Active Producing Wells from Asset Register
+            active_prod_mask = df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)
+            active_prod_wells = set(df_asset.loc[active_prod_mask, 'Well'].unique())
+            
+            # 2. Get Wells in Test File
+            test_wells = set(res['Well'].unique())
+            
+            # 3. Find Missing Wells (Active but not in Test)
+            missing_wells = list(active_prod_wells - test_wells)
+            
+            # 4. Check Frequency for Wells IN Test File
+            # Rule: Must have at least 1 test every 3 months.
+            # Convert date
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
-            valid_date_mask = res['Test Date'].notna()
             
-            if res['Test Date'].dropna().empty: max_date = datetime.now()
-            else: max_date = res['Test Date'].max()
+            # Filter for wells that are Active Producing found in Test Data
+            # We only enforce this rule for active producing wells
+            active_wells_in_test = test_wells.intersection(active_prod_wells)
             
-            cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0]
-            recent_tests = set(res[res['Test Date'] >= cutoff_date]['Well'].unique())
+            max_date_file = res['Test Date'].max()
+            if pd.isna(max_date_file): max_date_file = datetime.now()
             
-            is_active_well = res['Well'].isin(active_wells)
-            is_recent_test = res['Well'].isin(recent_tests)
-            res['Rule1_Pass'] = ~(is_active_well & ~is_recent_test & valid_date_mask)
+            bad_frequency_wells = set()
+            
+            # Extract relevant data for calculation
+            # We process per well to find gaps
+            temp_df = res[res['Well'].isin(active_wells_in_test)][['Well', 'Test Date']].dropna()
+            
+            if not temp_df.empty:
+                temp_df = temp_df.sort_values(['Well', 'Test Date'])
+                
+                # Internal Gaps (between tests)
+                temp_df['Prev_Date'] = temp_df.groupby('Well')['Test Date'].shift(1)
+                temp_df['Diff_Days'] = (temp_df['Test Date'] - temp_df['Prev_Date']).dt.days
+                
+                wells_with_internal_gaps = temp_df[temp_df['Diff_Days'] > 90]['Well'].unique()
+                bad_frequency_wells.update(wells_with_internal_gaps)
+                
+                # Tail Gaps (last test to max date)
+                last_dates = temp_df.groupby('Well')['Test Date'].max()
+                tail_gaps = (max_date_file - last_dates).dt.days
+                wells_with_tail_gaps = tail_gaps[tail_gaps > 90].index.tolist()
+                bad_frequency_wells.update(wells_with_tail_gaps)
+            
+            # Mark error for all rows of bad wells
+            res.loc[res['Well'].isin(bad_frequency_wells), 'Rule1_Pass'] = False
 
     res['Keterangan Error'] = ""
+    # Add Frequency Error (Rule 1)
     if check_rule1_active:
-        res.loc[~res['Rule1_Pass'], 'Keterangan Error'] += "⚠️ Active Well tidak ada test >3 bulan | "
+        res.loc[~res['Rule1_Pass'], 'Keterangan Error'] += "⚠️ Frekuensi Test Kurang (Gap > 3 Bulan) | "
+        
     res.loc[~res['Rule2_Pass'], 'Keterangan Error'] += "⚠️ Durasi > 0 tapi Produksi Nihil | "
     res.loc[~res['Rule3_Pass'], 'Keterangan Error'] += "⚠️ Produksi Ada tapi Durasi 0/Kosong | "
     res.loc[~res['Rule4_Pass'], 'Keterangan Error'] += "⚠️ Terdapat Nilai Negatif | "
     
     res['Keterangan Error'] = res['Keterangan Error'].str.rstrip(" | ")
     res.loc[res['Keterangan Error'] == "", 'Keterangan Error'] = "OK"
-    return res
+    
+    return res, missing_wells
 
 # --- FUNGSI KHUSUS WELL PARAMETER (WELL ON) ---
 
@@ -674,9 +715,19 @@ def main():
                         display_dataframe_optimized(df_filt, WELL_TEST_VALIDATE_BASIC)
                             
                     st.subheader("2. Validasi Kaidah Engineering")
-                    df_eng = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                     
-                    st.write("### 🚨 Data Bermasalah")
+                    # 1. Panggil fungsi validasi
+                    df_eng, missing_wells = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
+                    
+                    # 2. Tampilkan Missing Wells (Sumur Aktif tanpa Data Test)
+                    if missing_wells:
+                        st.warning(f"⚠️ Ditemukan **{len(missing_wells)} Sumur Active Producing** yang tidak memiliki data test sama sekali:")
+                        with st.expander("Lihat Daftar Sumur yang Hilang"):
+                            st.dataframe(pd.DataFrame(missing_wells, columns=["Nama Sumur Hilang"]), use_container_width=True)
+                    else:
+                        st.success("✅ Semua Sumur Active Producing dari Asset Register memiliki data di file Well Test.")
+
+                    st.write("### 🚨 Data Bermasalah (Problematic Rows)")
                     df_problems = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
                     
                     if df_problems.empty:
