@@ -68,31 +68,28 @@ MODULE_CONFIG = {
 # ==========================================
 
 def calculate_completeness_percentage(df, target_cols):
-    """
-    Menghitung % kelengkapan: (Sel Terisi / Total Sel Target) * 100
-    """
+    """Menghitung % kelengkapan data."""
     if df.empty:
         return 0.0
     
-    # Total sel yang harusnya ada isinya
     total_expected_cells = len(df) * len(target_cols)
-    
     if total_expected_cells == 0:
         return 0.0
 
-    # Menghitung jumlah sel yang tidak NULL/NaN di kolom target
-    # Kita anggap string kosong "" sebagai null juga
+    # Anggap string kosong sebagai NaN agar tidak terhitung sebagai 'terisi'
     filled_cells = df[target_cols].replace('', pd.NA).count().sum()
     
     return (filled_cells / total_expected_cells) * 100
 
 def get_missing_details(df, target_cols):
-    """
-    Menghitung jumlah data kosong per kolom untuk visualisasi
-    """
-    # Pastikan data kosong dianggap NA
+    """Detail kolom yang kosong."""
     temp_df = df[target_cols].replace('', pd.NA)
     return temp_df.isnull().sum().reset_index(name='Jumlah Kosong').rename(columns={'index': 'Nama Kolom'})
+
+def highlight_nulls(s):
+    """Warna kuning untuk sel kosong."""
+    is_missing = pd.isna(s) | (s == "")
+    return ['background-color: #ffeeb0' if v else '' for v in is_missing]
 
 # ==========================================
 # 4. ANTARMUKA PENGGUNA (FRONTEND STREAMLIT)
@@ -100,7 +97,7 @@ def get_missing_details(df, target_cols):
 
 def main():
     st.title("🗂️ Validasi Data: Asset Register")
-    st.markdown("Aplikasi validasi kelengkapan data operasional.")
+    st.markdown("Upload file Excel untuk melakukan validasi kelengkapan data.")
     
     # --- SIDEBAR: PEMILIHAN SUB-MENU ---
     st.sidebar.header("Navigasi Modul")
@@ -115,63 +112,63 @@ def main():
     validate_cols = config['validate_columns']
     hierarchy_cols = config['filter_hierarchy']
 
-    # --- BAGIAN 1: INPUT DATA (MENGGUNAKAN DATA EDITOR) ---
+    # --- BAGIAN 1: INPUT DATA (FILE UPLOAD) ---
     st.markdown("---")
-    st.subheader(f"1. Input Data: {selected_module}")
     
-    with st.expander("ℹ️ Cara Input Data (Klik disini)", expanded=True):
-        st.write("""
-        1. Siapkan data di Excel Anda. Pastikan urutan kolom **sama** dengan tabel di bawah.
-        2. Blok data di Excel (Ctrl+C).
-        3. Klik sel pojok kiri atas pada tabel di bawah, lalu Paste (Ctrl+V).
-        4. Klik tombol 'Lakukan Validasi' jika sudah selesai.
-        """)
+    col_up1, col_up2 = st.columns([2, 1])
     
-    # Membuat Template DataFrame Kosong dengan Header yang Benar
-    # Ini memastikan kolom sudah "Terbagi" sesuai permintaan Anda
-    df_template = pd.DataFrame(columns=required_cols)
-    
-    # Menampilkan Editor Tabel Interaktif
-    # num_rows="dynamic" memungkinkan Anda menambah baris dengan paste
-    edited_df = st.data_editor(
-        df_template,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key=f"editor_{selected_module}" # Key unik agar tidak crash saat ganti menu
-    )
+    with col_up1:
+        st.subheader(f"1. Upload Data Excel: {selected_module}")
+        uploaded_file = st.file_uploader("Pilih file Excel (.xlsx)", type=['xlsx', 'xls'])
 
-    # Tombol Action
-    # Kita butuh tombol karena data editor sifatnya interaktif
-    process_btn = st.button("🔍 Lakukan Validasi Data", type="primary")
+    with col_up2:
+        st.info("ℹ️ **Syarat Format File:**")
+        st.markdown(f"- **Baris 1:** Harus Header (Nama Kolom)")
+        st.markdown("- **Kolom Wajib:**")
+        st.code(", ".join(required_cols))
 
     # --- BAGIAN 2: PROSES DATA ---
-    if process_btn:
-        if not edited_df.empty:
-            st.success(f"✅ Data diterima: {len(edited_df)} baris.")
+    if uploaded_file is not None:
+        try:
+            # Membaca Excel (otomatis menjadikan baris pertama sebagai header)
+            df = pd.read_excel(uploaded_file)
             
-            # Bersihkan data (hapus baris yang semua kolomnya kosong/None)
-            df_clean = edited_df.dropna(how='all')
+            # Membersihkan nama kolom (menghapus spasi di awal/akhir nama kolom excel)
+            df.columns = df.columns.str.strip()
             
-            if df_clean.empty:
-                st.warning("Data kosong. Silakan paste data terlebih dahulu.")
+            # --- VALIDASI KOLOM (Header Check) ---
+            # Cek apakah kolom di Excel user sesuai dengan Config
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                st.error("❌ **Format File Excel Tidak Sesuai!**")
+                st.error(f"Kolom berikut tidak ditemukan di Excel Anda: {', '.join(missing_cols)}")
+                st.warning("Mohon perbaiki nama kolom di Excel Anda agar sesuai dengan daftar 'Kolom Wajib' di atas.")
+            
             else:
+                # Jika kolom sesuai, lanjut proses
+                st.success(f"✅ File berhasil dibaca: {len(df)} baris data.")
+                
+                # Bersihkan baris kosong
+                df = df.dropna(how='all')
+                
                 st.markdown("---")
                 st.subheader("2. Filter & Analisis Kelengkapan")
                 
                 # --- BAGIAN 3: DYNAMIC FILTERING (HIERARKI) ---
-                df_filtered = df_clean.copy()
+                df_filtered = df.copy()
                 cols_filter = st.columns(len(hierarchy_cols))
                 
                 for idx, col_name in enumerate(hierarchy_cols):
-                    # Konversi ke string agar aman saat filter
+                    # Konversi ke string agar aman saat filter dan replace nan dengan string kosong
                     df_filtered[col_name] = df_filtered[col_name].astype(str).replace('nan', '')
                     
+                    # Sorting opsi filter
                     unique_values = ["Semua"] + sorted(list(df_filtered[col_name].unique()))
                     
                     with cols_filter[idx]:
                         selected_val = st.selectbox(
-                            f"{col_name}", 
+                            f"Filter {col_name}", 
                             unique_values, 
                             key=f"filter_{col_name}"
                         )
@@ -195,19 +192,13 @@ def main():
                     )
                 
                 with c2:
-                    st.caption(f"Validasi dilakukan pada {len(validate_cols)} kolom parameter:")
+                    st.caption(f"Validasi pada {len(validate_cols)} parameter utama:")
                     st.code(", ".join(validate_cols))
 
                 # --- BAGIAN 5: TABEL DETAIL & DOWNLOAD ---
                 st.markdown("#### Detail Data (Terfilter)")
                 
-                # Fungsi Highlight
-                def highlight_nulls(s):
-                    # Cek null atau string kosong
-                    is_missing = pd.isna(s) | (s == "")
-                    return ['background-color: #ffeeb0' if v else '' for v in is_missing]
-                
-                # Tampilkan tabel hasil
+                # Tampilkan tabel hasil dengan highlight
                 st.dataframe(
                     df_filtered.style.apply(highlight_nulls, axis=1, subset=validate_cols),
                     use_container_width=True
@@ -217,18 +208,23 @@ def main():
                 missing_summary = get_missing_details(df_filtered, validate_cols)
                 if missing_summary['Jumlah Kosong'].sum() > 0:
                     st.warning("⚠️ **Rincian Kekurangan Data:**")
-                    st.dataframe(missing_summary[missing_summary['Jumlah Kosong'] > 0], use_container_width=False)
+                    st.dataframe(
+                        missing_summary[missing_summary['Jumlah Kosong'] > 0], 
+                        use_container_width=False
+                    )
                 
-                # Download
+                # Download Button
                 csv_data = df_filtered.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Download Data Validasi (.csv)",
+                    label="📥 Download Hasil Validasi (.csv)",
                     data=csv_data,
                     file_name=f"Validasi_{selected_module}_result.csv",
                     mime="text/csv"
                 )
-        else:
-            st.warning("Tabel masih kosong. Silakan Copy-Paste data dari Excel.")
+
+        except Exception as e:
+            st.error("Terjadi kesalahan saat membaca file Excel.")
+            st.error(f"Error detail: {e}")
 
 if __name__ == "__main__":
     main()
