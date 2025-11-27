@@ -77,6 +77,62 @@ WELL_TEST_VALIDATE_BASIC = [
 
 WELL_TEST_HIERARCHY = ["Regional", "Zona", "Working Area", "Asset Operation", "Well"]
 
+# --- CONFIG MODUL 3: WELL PARAMETER (WELL ON) ---
+# Header Umum (Common Columns) untuk semua jenis Lift
+WELL_PARAM_COMMON = [
+    "Regional", "Zona", "Working Area", "Asset Operation", "Entity ID",
+    "Well", "Well Status", "Skin Status", "Lifting Method", "Reservoir Name",
+    "Main Fluid Type", "Latitude", "Longitude", "POP Date Target",
+    "POP Date Actual", "Profile Summary"
+]
+
+WELL_PARAM_CONFIG = {
+    "ESP": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Dynamic Fluid Level (ft-MD)", "Static Fluid Level (ft-MD)", "Pump Efficiency (%)",
+        "Pump Optimal Design Rate / Capacity Design (BFPD)", "Pump Setting Depth (ft-MD)",
+        "Pump Type", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Serial Name",
+        "Stages", "Frequency (Hz)", "Ampere (Amp)", "Voltage (Volt)", "Rotation (RPM)",
+        "EQPM HP (HP)", "EQPM Rate (BFPD)", "Motor Voltage (Volt)", "Motor Amps (Amp)",
+        "Automatic Gas Handler", "Shroud", "Protector", "Sensor", "Start Date",
+        "DHP Date (dd/MM/yyyy)", "WHP", "Discharge Pressure (Psi)", "PBHP (Psi)", "Remarks"
+    ],
+    "GL": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Dynamic Fluid Level (ft-MD)", "Static Fluid Level (ft-MD)",
+        "Injection Fluid Pressure (Psig)", "InjectionTemperature (F)", "Number Gas Lift Valve",
+        "Gas Injection Choke (MMSCFD)", "Rate Injection Choke (MMSCFD)",
+        "Rate Liquid Optimization (MMSCFD)", "Gas Injection Rate (MMSCFD)", "PBHP (Psi)", "Remarks"
+    ],
+    "HJP": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Nozzle (Inch)", "Throat (Inch)", "Injection Fluid Pressure (Psig)",
+        "Injection Point (ft-MD)", "PBHP (Psi)", "Remarks"
+    ],
+    "HPU": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Dynamic Fluid Level (ft-MD)", "Static Fluid Level (ft-MD)", "Pump Efficiency (%)",
+        "Pump Optimal Design Rate / Capacity Design (BFPD)", "Pump Type",
+        "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Serial Name",
+        "Pump Setting Depth (ft-MD)", "Stroke Length", "Stroke Per Minute (SPM)", "PBHP (Psi)", "Remarks"
+    ],
+    "PCP": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Dynamic Fluid Level (ft-MD)", "Static Fluid Level (ft-MD)", "Pump Efficiency (%)",
+        "Pump Optimal Design Rate / Capacity Design (BFPD)", "Pump Type",
+        "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Serial Name",
+        "Pump Setting Depth (ft-MD)", "PBHP (Psi)", "Remarks"
+    ],
+    "SRP": WELL_PARAM_COMMON + [
+        "Ownership", "Manufacturer", "Brand", "Supplier / Vendor",
+        "Stroke Length", "Stroke Per Minute (SPM)",
+        "Dynamic Fluid Level (ft-MD)", "Static Fluid Level (ft-MD)", "Pump Efficiency (%)",
+        "Pump Optimal Design Rate / Capacity Design (BFPD)", "Pump Type",
+        "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Pump Setting Depth (ft-MD)",
+        "PBHP (Psi)", "Remarks"
+    ]
+}
+
 # ==========================================
 # 3. FUNGSI-FUNGSI LOGIKA (BACKEND)
 # ==========================================
@@ -137,9 +193,7 @@ def calculate_well_test_completeness(df):
 
 def validate_engineering_rules(df_test, df_asset):
     """
-    Melakukan validasi Engineering Rules 1-4.
-    Mengembalikan DataFrame dengan kolom tambahan hasil validasi (True/False)
-    dan kolom keterangan error.
+    Melakukan validasi Engineering Rules Modul Well Test.
     """
     res = df_test.copy()
     
@@ -148,81 +202,231 @@ def validate_engineering_rules(df_test, df_asset):
     for col in num_cols:
         res[col] = pd.to_numeric(res[col], errors='coerce').fillna(0)
 
-    # --- RULE 2: Jika Duration > 0, Produksi tidak boleh 0 semua ---
-    # Logic: Jika Duration > 0 AND (Oil=0 & Water=0 & Gas=0 & Cond=0 & Fluid=0) -> FALSE (Invalid)
+    # --- RULE 2, 3, 4 ---
     is_producing = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0) | (res["Fluid (BFPD)"] > 0)
     res['Rule2_Pass'] = ~((res["Test Duration(Hours)"] > 0) & (~is_producing))
     
-    # --- RULE 3: Jika Salah satu produksi > 0, Duration harus > 0 ---
     produces_something = (res["Oil (BOPD)"] > 0) | (res["Water (BWPD)"] > 0) | (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0)
     res['Rule3_Pass'] = ~((produces_something) & (res["Test Duration(Hours)"] <= 0))
     
-    # --- RULE 4: Semua value harus >= 0 (Tidak boleh negatif) ---
     res['Rule4_Pass'] = (res[num_cols] >= 0).all(axis=1)
 
-    # --- RULE 1: Frekuensi Test (Butuh data Asset Register) ---
-    res['Rule1_Pass'] = True # Default True jika tidak ada data aset (anggap tidak bisa divalidasi)
-    check_rule1_active = False # Flag apakah validasi ini berjalan
+    # --- RULE 1: Frekuensi Test ---
+    res['Rule1_Pass'] = True 
+    check_rule1_active = False
     
     if df_asset is not None and not df_asset.empty:
-        # Pastikan kolom yang dibutuhkan ada
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
             check_rule1_active = True
-            # 1. Ambil list Active Well Producing
             active_wells = df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)]['Well'].unique()
             
-            # 2. Cek Tanggal Test
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
-            
-            # Tentukan Cutoff Date (Hari ini atau Max Date di data - 90 hari)
             if res['Test Date'].dropna().empty:
                 max_date = datetime.now()
             else:
                 max_date = res['Test Date'].max()
             
             cutoff_date = max_date - pd.timedelta_range(start='1 days', periods=1, freq='90D')[0]
-            
-            # Cari sumur yang memiliki setidaknya satu tes dalam rentang 90 hari terakhir
             recent_tests = res[res['Test Date'] >= cutoff_date]['Well'].unique()
             
             def check_rule1(row):
                 well_name = row['Well']
-                # Jika bukan Active Well, tidak wajib tes -> Lolos
-                if well_name not in active_wells:
-                    return True 
-                # Jika Active Well, harus ada di daftar recent_tests
-                if well_name in recent_tests:
-                    return True 
-                # Active tapi tidak ada tes dalam 3 bulan terakhir -> Gagal
+                if well_name not in active_wells: return True 
+                if well_name in recent_tests: return True 
                 return False 
             
             res['Rule1_Pass'] = res.apply(check_rule1, axis=1)
 
-    # --- MEMBUAT KOLOM KETERANGAN ERROR ---
+    # --- KETERANGAN ERROR ---
     def generate_remarks(row):
         errors = []
-        
-        # Cek Rule 1
-        if check_rule1_active and row['Rule1_Pass'] is False:
-            errors.append("⚠️ Active Well tidak ada test >3 bulan")
-            
-        # Cek Rule 2
-        if not row['Rule2_Pass']:
-            errors.append("⚠️ Durasi > 0 tapi Produksi Nihil")
-            
-        # Cek Rule 3
-        if not row['Rule3_Pass']:
-            errors.append("⚠️ Produksi Ada tapi Durasi 0/Kosong")
-            
-        # Cek Rule 4
-        if not row['Rule4_Pass']:
-            errors.append("⚠️ Terdapat Nilai Negatif")
-            
+        if check_rule1_active and row['Rule1_Pass'] is False: errors.append("⚠️ Active Well tidak ada test >3 bulan")
+        if not row['Rule2_Pass']: errors.append("⚠️ Durasi > 0 tapi Produksi Nihil")
+        if not row['Rule3_Pass']: errors.append("⚠️ Produksi Ada tapi Durasi 0/Kosong")
+        if not row['Rule4_Pass']: errors.append("⚠️ Terdapat Nilai Negatif")
         return " | ".join(errors) if errors else "OK"
 
     res['Keterangan Error'] = res.apply(generate_remarks, axis=1)
-    
     return res
+
+# --- FUNGSI KHUSUS WELL PARAMETER (WELL ON) ---
+
+def validate_well_parameter_rules(df_input, lift_type, df_asset):
+    """
+    Validasi Engineering Kompleks untuk Modul Well Parameter.
+    Mengutamakan 'Well Status' dari file input jika ada.
+    """
+    df_merged = df_input.copy()
+    
+    # 1. Menyiapkan Kolom Status
+    # Cek apakah 'Well Status' sudah ada di input (seharusnya ada berdasarkan config baru)
+    if 'Well Status' not in df_merged.columns:
+        # Fallback: Merge dengan Asset Register jika tidak ada di input
+        if df_asset is None or df_asset.empty:
+            df_merged['Well Status'] = "Unknown"
+        else:
+            asset_status = df_asset[['Well', 'Well Status']].drop_duplicates('Well')
+            df_merged = df_merged.merge(asset_status, on='Well', how='left')
+            df_merged['Well Status'] = df_merged['Well Status'].fillna("Unknown")
+    else:
+        # Jika sudah ada, pastikan tidak null
+        df_merged['Well Status'] = df_merged['Well Status'].fillna("Unknown")
+
+    # Normalisasi string (case insensitive)
+    df_merged['Status_Norm'] = df_merged['Well Status'].astype(str).str.strip()
+    
+    def check_row(row):
+        errs = []
+        status = row['Status_Norm']
+        
+        # Helper untuk cek > 0
+        def check_positive(col_name):
+            val = row.get(col_name)
+            try:
+                if pd.isna(val) or float(val) <= 0:
+                    errs.append(f"{col_name} <= 0")
+            except:
+                pass # Abaikan jika bukan angka, nanti akan tertangkap validasi tipe data lain jika perlu
+
+        # Helper untuk cek Range (Min < Design < Max)
+        def check_design_range():
+            try:
+                des = float(row.get("Pump Optimal Design Rate / Capacity Design (BFPD)", 0))
+                min_v = float(row.get("Min BLPD (BFPD)", 0))
+                max_v = float(row.get("Max BLPD (BFPD)", 0))
+                if not (min_v < des < max_v):
+                    errs.append("Design Rate tidak di antara Min & Max")
+            except:
+                pass 
+
+        # --- LOGIKA UMUM PER LIFT TYPE ---
+        
+        # 1. ESP
+        if lift_type == "ESP":
+            try:
+                if float(row.get("Pump Efficiency (%)", 0)) > 100: errs.append("Efficiency > 100%")
+            except: pass
+            
+            always_positive = ["Pump Type", "Serial Name", "Automatic Gas Handler", "Shroud", "Protector", "Sensor"]
+            for c in always_positive:
+                val = row.get(c)
+                if val == 0 or val == "0": errs.append(f"{c} is 0")
+
+            if "Active Well Producing" in status:
+                cols = [
+                    "Dynamic Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Setting Depth (ft-MD)", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Stages",
+                    "Frequency (Hz)", "Ampere (Amp)", "Voltage (Volt)", "Rotation (RPM)", "EQPM HP (HP)",
+                    "EQPM Rate (BFPD)", "Motor Voltage (Volt)", "Motor Amps (Amp)", "WHP", "Discharge Pressure (Psi)", "PBHP (Psi)"
+                ]
+                for c in cols: check_positive(c)
+                
+            elif "Active Well Non Production" in status:
+                cols = [
+                    "Static Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Setting Depth (ft-MD)", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Stages",
+                    "Frequency (Hz)", "Ampere (Amp)", "Voltage (Volt)", "Rotation (RPM)", "EQPM HP (HP)",
+                    "EQPM Rate (BFPD)", "Motor Voltage (Volt)", "Motor Amps (Amp)", "WHP", "Discharge Pressure (Psi)", "PBHP (Psi)"
+                ]
+                for c in cols: check_positive(c)
+                
+            check_design_range()
+
+        # 2. GL
+        elif lift_type == "GL":
+            if "Active Well Producing" in status:
+                cols = [
+                    "Dynamic Fluid Level (ft-MD)", "Injection Fluid Pressure (Psig)", "InjectionTemperature (F)",
+                    "Number Gas Lift Valve", "Gas Injection Choke (MMSCFD)", "Rate Injection Choke (MMSCFD)",
+                    "Rate Liquid Optimization (MMSCFD)", "Gas Injection Rate (MMSCFD)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c) 
+                
+            elif "Active Well Non Production" in status:
+                cols = [
+                    "Static Fluid Level (ft-MD)", "Injection Fluid Pressure (Psig)", "InjectionTemperature (F)",
+                    "Number Gas Lift Valve", "Gas Injection Choke (MMSCFD)", "Rate Injection Choke (MMSCFD)",
+                    "Rate Liquid Optimization (MMSCFD)", "Gas Injection Rate (MMSCFD)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+
+        # 3. HJP
+        elif lift_type == "HJP":
+            if "Active Well Producing" in status or "Active Well Non Production" in status:
+                cols = ["Nozzle (Inch)", "Throat (Inch)", "Injection Fluid Pressure (Psig)", "Injection Point (ft-MD)", "PBHP (Psi)", "Remarks"]
+                for c in cols: check_positive(c)
+
+        # 4. HPU
+        elif lift_type == "HPU":
+            if row.get("Pump Type") == 0: errs.append("Pump Type is 0")
+            if row.get("Serial Name") == 0: errs.append("Serial Name is 0")
+            
+            if "Active Well Producing" in status:
+                cols = [
+                    "Dynamic Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Pump Setting Depth (ft-MD)",
+                    "Stroke Length", "Stroke Per Minute (SPM)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+
+            elif "Active Well Non Production" in status:
+                cols = [
+                    "Static Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Pump Setting Depth (ft-MD)",
+                    "Stroke Length", "Stroke Per Minute (SPM)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+            
+            check_design_range()
+
+        # 5. PCP
+        elif lift_type == "PCP":
+            if row.get("Pump Type") == 0: errs.append("Pump Type is 0")
+            if row.get("Serial Name") == 0: errs.append("Serial Name is 0")
+            
+            if "Active Well Producing" in status:
+                cols = [
+                    "Dynamic Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Type", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Serial Name",
+                    "Pump Setting Depth (ft-MD)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+            elif "Active Well Non Production" in status:
+                cols = [
+                    "Static Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Type", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Serial Name",
+                    "Pump Setting Depth (ft-MD)", "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+                
+            check_design_range()
+            
+        # 6. SRP
+        elif lift_type == "SRP":
+            if row.get("Pump Type") == 0: errs.append("Pump Type is 0")
+            if row.get("Serial Name") == 0: errs.append("Serial Name is 0")
+
+            if "Active Well Producing" in status:
+                cols = [
+                    "Dynamic Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Type", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Pump Setting Depth (ft-MD)",
+                    "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+            elif "Active Well Non Production" in status:
+                cols = [
+                    "Static Fluid Level (ft-MD)", "Pump Efficiency (%)", "Pump Optimal Design Rate / Capacity Design (BFPD)",
+                    "Pump Type", "Min BLPD (BFPD)", "Max BLPD (BFPD)", "Pump Size", "Pump Setting Depth (ft-MD)",
+                    "PBHP (Psi)", "Remarks"
+                ]
+                for c in cols: check_positive(c)
+
+            check_design_range()
+
+        return " | ".join(errs) if errs else "OK"
+
+    df_merged['Keterangan Error'] = df_merged.apply(check_row, axis=1)
+    return df_merged
 
 # ==========================================
 # 4. ANTARMUKA PENGGUNA (MAIN UI)
@@ -232,7 +436,10 @@ def main():
     st.sidebar.title("🛢️ Menu Aplikasi")
     
     # Main Menu Switcher
-    main_menu = st.sidebar.selectbox("Pilih Modul Validasi:", ["Asset Register", "Production Well Test"])
+    main_menu = st.sidebar.selectbox(
+        "Pilih Modul Validasi:", 
+        ["Asset Register", "Production Well Test", "Well Parameter (Well On)"]
+    )
     
     # ---------------------------------------------------------
     # MODUL 1: ASSET REGISTER
@@ -269,11 +476,9 @@ def main():
                     df = df.dropna(how='all')
 
                     # --- LOGIKA PENYIMPANAN SESSION STATE ---
-                    # HANYA simpan jika user mengupload data pada sub-menu "Well"
-                    # Data dari Zona, Working Area, dll TIDAK BOLEH menimpa data Well
                     if sub_menu == "Well":
                         st.session_state['asset_register_df'] = df
-                        st.toast("Data Well berhasil disimpan ke memori untuk referensi Modul Well Test!", icon="💾")
+                        st.toast("Data Well berhasil disimpan ke memori untuk referensi Modul lain!", icon="💾")
                     
                     # --- FILTERING ---
                     df_filt = df.copy()
@@ -296,14 +501,11 @@ def main():
                     except:
                         st.dataframe(df_filt, use_container_width=True)
 
-                    # Tabel Ringkasan Data Kosong (Dikembalikan)
+                    # Tabel Ringkasan Data Kosong
                     missing_summary = get_missing_details(df_filt, config['validate_columns'])
                     if missing_summary['Jumlah Kosong'].sum() > 0:
                         st.warning("⚠️ **Rincian Kekurangan Data (Per Kolom Wajib):**")
-                        st.dataframe(
-                            missing_summary[missing_summary['Jumlah Kosong'] > 0], 
-                            use_container_width=False
-                        )
+                        st.dataframe(missing_summary[missing_summary['Jumlah Kosong'] > 0], use_container_width=False)
                     else:
                         st.success("✅ Semua kolom wajib telah terisi penuh.")
                         
@@ -321,9 +523,8 @@ def main():
         
         if not asset_ready:
             st.warning("⚠️ **Peringatan:** Data 'Well' di Asset Register belum diupload.")
-            st.info("Silakan ke Menu 'Asset Register' > Sub-Menu 'Well', upload file, lalu kembali ke sini. Validasi Rule 1 (Frekuensi) & Referensi Lifting Method butuh data tersebut.")
         else:
-            st.success("✅ Terhubung dengan data referensi Asset Register (Sub-menu Well).")
+            st.success("✅ Terhubung dengan data referensi Asset Register.")
 
         uploaded_test = st.file_uploader("Upload Excel Well Test", type=['xlsx', 'xls'])
         
@@ -335,32 +536,23 @@ def main():
                 df_test = pd.read_excel(uploaded_test)
                 df_test.columns = df_test.columns.str.strip()
                 
-                # Validasi Header
                 missing = [c for c in WELL_TEST_COLUMNS if c not in df_test.columns]
                 if missing:
                     st.error(f"Kolom hilang: {missing}")
                 else:
-                    st.success(f"Data Well Test dimuat: {len(df_test)} baris.")
+                    st.success(f"Data dimuat: {len(df_test)} baris.")
                     df_test = df_test.dropna(how='all')
                     
-                    # --- CROSS-REFERENCE LIFTING METHOD (Jika Kolom Kosong) ---
-                    # Hanya lakukan jika data asset well tersedia
                     if asset_ready:
                         try:
-                            # Merge sederhana based on Well Name / Entity ID
                             asset_ref = st.session_state['asset_register_df'][['Well', 'Lifting Method']].drop_duplicates('Well')
-                            
-                            # Jika kolom Lifting Method Name ada tapi kosong, kita isi dari asset
                             if 'Lifting Method Name' in df_test.columns:
                                 df_test = df_test.merge(asset_ref, on='Well', how='left', suffixes=('', '_asset'))
                                 df_test['Lifting Method Name'] = df_test['Lifting Method Name'].fillna(df_test['Lifting Method'])
-                                # Hapus kolom bantuan jika ada
                                 if 'Lifting Method' in df_test.columns and 'Lifting Method' != 'Lifting Method Name':
                                     df_test = df_test.drop(columns=['Lifting Method'])
-                        except Exception as e:
-                            st.warning(f"Gagal melakukan cross-reference Lifting Method: {e}")
+                        except: pass
                     
-                    # --- FILTERING HIERARKI ---
                     df_filt = df_test.copy()
                     cols_filt = st.columns(len(WELL_TEST_HIERARCHY))
                     for i, col in enumerate(WELL_TEST_HIERARCHY):
@@ -372,78 +564,134 @@ def main():
                     
                     st.markdown("---")
                     
-                    # --- 1. VALIDASI KELENGKAPAN DATA (COMPLETENESS) ---
+                    # 1. COMPLETENESS
                     st.subheader("1. Validasi Kelengkapan Data")
                     comp_score = calculate_well_test_completeness(df_filt)
+                    st.metric("Total Data Completeness", f"{comp_score:.2f}%")
                     
-                    col_met1, col_met2 = st.columns(2)
-                    with col_met1:
-                        st.metric("Total Data Completeness", f"{comp_score:.2f}%")
-                        st.caption("*Memperhitungkan kondisi wajib ESP & Gas Lift")
-                    
-                    # Tampilkan Detail Kelengkapan
                     with st.expander("Detail Tabel Kelengkapan"):
                         try:
                             st.dataframe(df_filt.style.apply(highlight_nulls, axis=1, subset=WELL_TEST_VALIDATE_BASIC), use_container_width=True)
                         except:
                             st.dataframe(df_filt, use_container_width=True)
                             
-                    # --- 2. VALIDASI KAIDAH ENGINEERING ---
+                    # 2. ENGINEERING RULES
                     st.subheader("2. Validasi Kaidah Engineering")
-                    
-                    # Jalankan logic engineering
                     df_eng = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                     
-                    # Hitung Skor Kualitas Engineering
-                    rule1_score = (df_eng['Rule1_Pass'] == True).sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
-                    rule2_score = df_eng['Rule2_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
-                    rule3_score = df_eng['Rule3_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
-                    rule4_score = df_eng['Rule4_Pass'].sum() / len(df_eng) * 100 if len(df_eng) > 0 else 0
-                    
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Rule 1 (Freq 3 Mo)", f"{rule1_score:.1f}%", help="Active Well wajib test minimal sekali dalam 3 bulan terakhir")
-                    c2.metric("Rule 2 (Non-Zero)", f"{rule2_score:.1f}%", help="Jika Durasi>0, Produksi gaboleh 0 semua")
-                    c3.metric("Rule 3 (Duration)", f"{rule3_score:.1f}%", help="Jika Produksi>0, Durasi wajib >0")
-                    c4.metric("Rule 4 (Positive)", f"{rule4_score:.1f}%", help="Tidak boleh ada angka negatif")
-                    
-                    # --- OUTPUT HANYA BARIS YANG BERMASALAH ---
-                    st.write("### 🚨 Data Bermasalah (Problematic Rows)")
-                    st.caption("Menampilkan baris data yang melanggar minimal satu aturan engineering.")
-                    
-                    # Filter: Ambil baris yang Keterangan Error-nya TIDAK "OK"
+                    # Output Error Only
+                    st.write("### 🚨 Data Bermasalah")
                     df_problems = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
                     
                     if df_problems.empty:
-                        st.success("✅ Tidak ditemukan pelanggaran kaidah engineering pada data ini.")
+                        st.success("✅ Tidak ditemukan pelanggaran.")
                     else:
-                        # Tampilkan Kolom Penting + Keterangan Error
-                        display_cols = [
-                            'Well', 'Test Date (dd/mm/yyyy)', 'Keterangan Error',
-                            'Test Duration(Hours)', 'Oil (BOPD)', 'Water (BWPD)', 'Gas (MMSCFD)'
-                        ]
-                        
-                        # Warnai tabel error dengan highlight merah muda
+                        display_cols = ['Well', 'Test Date (dd/mm/yyyy)', 'Keterangan Error', 'Test Duration(Hours)', 'Oil (BOPD)']
                         try:
-                            st.dataframe(
-                                df_problems[display_cols].style.applymap(
-                                    lambda _: 'background-color: #ffcccc', subset=['Keterangan Error']
-                                ),
-                                use_container_width=True
-                            )
+                            st.dataframe(df_problems[display_cols].style.applymap(lambda _: 'background-color: #ffcccc', subset=['Keterangan Error']), use_container_width=True)
                         except:
                             st.dataframe(df_problems[display_cols], use_container_width=True)
                         
-                        # Download Result (Hanya yang error)
                         csv_eng = df_problems.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="📥 Download Data Bermasalah (.csv)", 
-                            data=csv_eng, 
-                            file_name="Engineering_Issues.csv", 
-                            mime="text/csv"
-                        )
+                        st.download_button("📥 Download Data Bermasalah", csv_eng, "Engineering_Issues.csv", "text/csv")
 
             except Exception as e:
-                st.error(f"Gagal memproses Well Test: {e}")
+                st.error(f"Error: {e}")
+
+    # ---------------------------------------------------------
+    # MODUL 3: WELL PARAMETER (WELL ON)
+    # ---------------------------------------------------------
+    elif main_menu == "Well Parameter (Well On)":
+        st.title("⚙️ Modul 3: Well Parameter (Well On)")
+        
+        # Cek Referensi Asset Register (Optional tapi recommended)
+        asset_ready = st.session_state['asset_register_df'] is not None
+        if not asset_ready:
+            st.info("ℹ️ Tips: Upload data Asset Register terlebih dahulu untuk validasi status sumur yang lebih akurat (jika status tidak tersedia di file input).")
+        
+        # Sub-Menu Lift Type
+        lift_type = st.sidebar.radio("Pilih Artificial Lift:", list(WELL_PARAM_CONFIG.keys()))
+        target_cols = WELL_PARAM_CONFIG[lift_type]
+        
+        uploaded_param = st.file_uploader(f"Upload Excel {lift_type}", type=['xlsx', 'xls'])
+        
+        with st.expander(f"Lihat Kolom Wajib {lift_type}"):
+            st.code(", ".join(target_cols))
+            
+        if uploaded_param:
+            try:
+                df_param = pd.read_excel(uploaded_param)
+                df_param.columns = df_param.columns.str.strip()
+                
+                # Cek Header
+                missing = [c for c in target_cols if c not in df_param.columns]
+                if missing:
+                    st.error(f"Kolom hilang: {missing}")
+                else:
+                    st.success(f"Data {lift_type} dimuat: {len(df_param)} baris.")
+                    df_param = df_param.dropna(how='all')
+                    
+                    st.markdown("---")
+                    
+                    # 1. KELENGKAPAN (COMPLETENESS)
+                    # Sesuai prompt, completeness ditampilkan seperti modul sebelumnya
+                    st.subheader("1. Validasi Kelengkapan Data")
+                    score = calculate_simple_completeness(df_param, target_cols)
+                    st.metric("Completeness", f"{score:.2f}%")
+                    
+                    with st.expander("Detail Tabel Kelengkapan"):
+                        try:
+                            st.dataframe(df_param.style.apply(highlight_nulls, axis=1, subset=target_cols), use_container_width=True)
+                        except:
+                            st.dataframe(df_param, use_container_width=True)
+                            
+                    # Ringkasan Kosong
+                    missing_summary = get_missing_details(df_param, target_cols)
+                    if missing_summary['Jumlah Kosong'].sum() > 0:
+                        st.warning("Rincian Kekurangan Data:")
+                        st.dataframe(missing_summary[missing_summary['Jumlah Kosong'] > 0], use_container_width=False)
+                    
+                    # 2. ENGINEERING RULES
+                    st.subheader("2. Validasi Kaidah Engineering")
+                    
+                    df_eng_param = validate_well_parameter_rules(df_param, lift_type, st.session_state['asset_register_df'])
+                    
+                    # Hitung Pass Rate
+                    pass_rate = (df_eng_param['Keterangan Error'] == "OK").sum() / len(df_eng_param) * 100 if len(df_eng_param) > 0 else 0
+                    st.metric("Engineering Compliance Rate", f"{pass_rate:.2f}%")
+                    
+                    # Output Error Only
+                    st.write("### 🚨 Data Bermasalah")
+                    st.caption("Validasi berdasarkan status sumur (Active Producing / Active Non Production)")
+                    
+                    df_problems = df_eng_param[df_eng_param['Keterangan Error'] != "OK"].copy()
+                    
+                    if df_problems.empty:
+                        st.success("✅ Tidak ditemukan pelanggaran kaidah engineering.")
+                    else:
+                        # Tampilkan kolom Well, Status, Keterangan Error, dan beberapa parameter utama
+                        show_cols = ['Well', 'Well Status', 'Keterangan Error']
+                        # Tambahkan beberapa kolom data penting dari config lift type sebagai preview (selain kolom umum)
+                        # Kita ambil kolom dari index 16 keatas (karena 0-15 adalah kolom umum)
+                        important_params = target_cols[16:22] if len(target_cols) > 22 else target_cols[16:]
+                        show_cols += important_params
+                        
+                        # Pastikan kolom ada
+                        show_cols = [c for c in show_cols if c in df_problems.columns]
+                        
+                        try:
+                            st.dataframe(
+                                df_problems[show_cols].style.applymap(lambda _: 'background-color: #ffcccc', subset=['Keterangan Error']),
+                                use_container_width=True
+                            )
+                        except:
+                            st.dataframe(df_problems[show_cols], use_container_width=True)
+                            
+                        csv_err = df_problems.to_csv(index=False).encode('utf-8')
+                        st.download_button("📥 Download Data Bermasalah", csv_err, f"Engineering_Issues_{lift_type}.csv", "text/csv")
+                        
+            except Exception as e:
+                st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
