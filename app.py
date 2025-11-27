@@ -343,7 +343,12 @@ def validate_engineering_rules(df_test, df_asset):
 
 @st.cache_data
 def calculate_well_param_completeness(df, lift_type):
+    """
+    Hitung kelengkapan sesuai aturan: Hanya untuk Active Well.
+    Returns Dictionary dengan detail score, filled, dan expected.
+    """
     if df.empty: return None
+    
     config = WELL_PARAM_CONFIG[lift_type]
     base_cols = config['check_cols']
     cond_map = config['conditional'] 
@@ -373,8 +378,15 @@ def calculate_well_param_completeness(df, lift_type):
             total_expected += mask_non_prod.sum()
             total_filled += df_active.loc[mask_non_prod, stat_col].replace('', pd.NA).notna().sum()
         
-    if total_expected == 0: return 0.0
-    return (total_filled / total_expected) * 100
+    score = 0.0
+    if total_expected > 0:
+        score = (total_filled / total_expected) * 100
+        
+    return {
+        "score": score,
+        "filled": total_filled,
+        "expected": total_expected
+    }
 
 @st.cache_data
 def validate_well_parameter_rules(df_input, lift_type):
@@ -481,51 +493,44 @@ def validate_well_parameter_rules(df_input, lift_type):
 @st.cache_data
 def calculate_event_al_completeness(df):
     """
-    Menghitung kelengkapan data Event Artificial Lift (Well Off).
-    Scope: Hanya baris dengan Is Replacement = 'Yes' atau Blank.
-    Kondisional: AL Purchase Cost & Surface Recovery Cost.
+    Menghitung kelengkapan data Event Artificial Lift.
+    Returns Dictionary dengan detail score, filled, dan expected.
     """
-    if df.empty: return 0.0
+    default_res = {"score": 0.0, "filled": 0, "expected": 0}
+    if df.empty: return default_res
     
-    # 1. Filter Scope: Is Replacement == 'Yes' OR Blank (NaN/Empty)
-    # Normalisasi kolom Is Replacement
-    if "Is Replacement" not in df.columns:
-        return 0.0
+    if "Is Replacement" not in df.columns: return default_res
     
-    # Buat mask: Is Replacement berisi Yes (case insensitive) atau null/kosong
     is_replacement_col = df["Is Replacement"].astype(str).str.strip().str.lower()
     mask_scope = (is_replacement_col == "yes") | (is_replacement_col == "nan") | (is_replacement_col == "") | (df["Is Replacement"].isna())
     
     df_scope = df[mask_scope].copy()
-    if df_scope.empty:
-        return 0.0 # Tidak ada data yang masuk scope perhitungan
+    if df_scope.empty: return default_res
     
-    # 2. Hitung Basic Columns
     total_expected = len(df_scope) * len(EVENT_AL_VALIDATE_COLS)
     total_filled = df_scope[EVENT_AL_VALIDATE_COLS].replace('', pd.NA).count().sum()
     
-    # 3. Hitung Conditional Columns
-    
-    # A. AL Purchase Cost (USD) -> Wajib jika Ownership != 'Rent'
-    # "selain value ‘Rent’" -> berarti termasuk null/blank dianggap bukan rent -> wajib isi?
-    # Asumsi: Jika ownership kosong, anggap bukan Rent, jadi wajib.
     if "Ownership" in df_scope.columns and "AL Purchase Cost (USD)" in df_scope.columns:
         ownership_norm = df_scope["Ownership"].astype(str).str.strip().str.lower()
         mask_not_rent = ownership_norm != "rent"
-        
         total_expected += mask_not_rent.sum()
         total_filled += df_scope.loc[mask_not_rent, "AL Purchase Cost (USD)"].replace('', pd.NA).notna().sum()
         
-    # B. Surface Recovery Cost (USD) -> Wajib jika Event Artificial Lift Type == 'Surface'
     if "Event Artificial Lift Type" in df_scope.columns and "Surface Recovery Cost (USD)" in df_scope.columns:
         type_norm = df_scope["Event Artificial Lift Type"].astype(str).str.strip().str.lower()
         mask_surface = type_norm == "surface"
-        
         total_expected += mask_surface.sum()
         total_filled += df_scope.loc[mask_surface, "Surface Recovery Cost (USD)"].replace('', pd.NA).notna().sum()
         
-    if total_expected == 0: return 0.0
-    return (total_filled / total_expected) * 100
+    score = 0.0
+    if total_expected > 0:
+        score = (total_filled / total_expected) * 100
+        
+    return {
+        "score": score,
+        "filled": total_filled,
+        "expected": total_expected
+    }
 
 # ==========================================
 # 4. ANTARMUKA PENGGUNA (MAIN UI)
@@ -703,14 +708,15 @@ def main():
 
                     st.markdown("---")
                     
+                    # 1. KELENGKAPAN
                     st.subheader("1. Validasi Kelengkapan Data")
                     
-                    score = calculate_well_param_completeness(df_filt, lift_type)
+                    res_total = calculate_well_param_completeness(df_filt, lift_type)
                     
-                    if score is None:
+                    if res_total is None:
                         st.warning(f"⚠️ **Lifting Method {lift_type} tidak terdapat pada area ini** (Tidak ada Active Well Producing/Non Production).")
                     else:
-                        st.metric("Total Completeness (Active Wells)", f"{score:.2f}%")
+                        st.metric("Total Completeness (Active Wells)", f"{res_total['score']:.2f}%")
 
                         next_level_idx = last_selected_level + 1
                         if next_level_idx < len(WELL_PARAM_HIERARCHY):
@@ -723,11 +729,14 @@ def main():
                                     breakdown_data = []
                                     for g in groups:
                                         sub_df = df_filt[df_filt[breakdown_col] == g]
-                                        sub_score = calculate_well_param_completeness(sub_df, lift_type)
-                                        if sub_score is not None:
+                                        sub_res = calculate_well_param_completeness(sub_df, lift_type)
+                                        
+                                        if sub_res is not None:
                                             breakdown_data.append({
                                                 breakdown_col: g, 
-                                                "Completeness (%)": sub_score, 
+                                                "Completeness (%)": sub_res['score'], 
+                                                "Sel Terisi": sub_res['filled'],
+                                                "Total Sel": sub_res['expected'],
                                                 "Jumlah Baris": len(sub_df)
                                             })
                                     
@@ -793,10 +802,8 @@ def main():
                 else:
                     st.success(f"Data dimuat: {len(df_event)} baris.")
                     
-                    # Pre-processing Date for Month/Year
                     date_col = "Event Start Time (dd/MM/yyy HH:mm)"
                     if date_col in df_event.columns:
-                        # Try parsing various formats
                         df_event['EventDate'] = pd.to_datetime(df_event[date_col], format='%d/%m/%Y %H:%M', errors='coerce')
                         df_event['Tahun'] = df_event['EventDate'].dt.year
                         df_event['Bulan'] = df_event['EventDate'].dt.month_name()
@@ -822,30 +829,28 @@ def main():
                             
                     st.markdown("---")
                     
-                    # 1. KELENGKAPAN
                     st.subheader("1. Validasi Kelengkapan Data")
                     st.info("Hanya menghitung baris di mana 'Is Replacement' = 'Yes' atau Blank.")
                     
-                    score = calculate_event_al_completeness(df_filt)
-                    st.metric("Completeness (Replacement Scope)", f"{score:.2f}%")
+                    res_total = calculate_event_al_completeness(df_filt)
+                    st.metric("Completeness (Replacement Scope)", f"{res_total['score']:.2f}%")
                     
-                    # Breakdown per Bulan/Tahun
                     if 'Periode' in df_filt.columns:
                         st.markdown("**Breakdown Completeness per Bulan/Tahun:**")
                         
-                        # Group by Periode
                         period_groups = df_filt['Periode'].unique()
-                        # Hapus NaT/NaN periods
                         period_groups = [p for p in period_groups if str(p) != 'nan']
                         period_groups.sort()
                         
                         period_data = []
                         for p in period_groups:
                             sub_df = df_filt[df_filt['Periode'] == p]
-                            sub_score = calculate_event_al_completeness(sub_df)
+                            sub_res = calculate_event_al_completeness(sub_df)
                             period_data.append({
                                 "Periode": p,
-                                "Completeness (%)": sub_score,
+                                "Completeness (%)": sub_res['score'],
+                                "Sel Terisi": sub_res['filled'],
+                                "Total Sel": sub_res['expected'],
                                 "Jumlah Data": len(sub_df)
                             })
                         
@@ -853,7 +858,6 @@ def main():
                             st.dataframe(pd.DataFrame(period_data), use_container_width=True)
                     
                     with st.expander("Detail Data (Scope Replacement)"):
-                        # Filter tampilan hanya scope replacement
                         is_rep = df_filt["Is Replacement"].astype(str).str.strip().str.lower()
                         mask_scope = (is_rep == "yes") | (is_rep == "nan") | (is_rep == "") | (df_filt["Is Replacement"].isna())
                         df_show = df_filt[mask_scope]
