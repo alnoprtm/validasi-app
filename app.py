@@ -345,7 +345,7 @@ def validate_engineering_rules(df_test, df_asset):
 def calculate_well_param_completeness(df, lift_type):
     """
     Hitung kelengkapan sesuai aturan: Hanya untuk Active Well.
-    Returns Dictionary dengan detail score, filled, dan expected.
+    Returns Dictionary dengan detail score, filled, expected, DAN jumlah baris AKTIF saja.
     """
     if df.empty: return None
     
@@ -385,7 +385,8 @@ def calculate_well_param_completeness(df, lift_type):
     return {
         "score": score,
         "filled": total_filled,
-        "expected": total_expected
+        "expected": total_expected,
+        "active_rows": len(df_active) # Hanya hitung baris aktif
     }
 
 @st.cache_data
@@ -737,7 +738,7 @@ def main():
                                                 "Completeness (%)": sub_res['score'], 
                                                 "Sel Terisi": sub_res['filled'],
                                                 "Total Sel": sub_res['expected'],
-                                                "Jumlah Baris": len(sub_df)
+                                                "Jumlah Baris": sub_res['active_rows'] # Hanya baris aktif
                                             })
                                     
                                     if breakdown_data:
