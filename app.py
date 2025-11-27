@@ -241,7 +241,9 @@ def display_dataframe_optimized(df, target_cols=None, use_highlight=True):
     if use_highlight and total_cells <= MAX_CELLS_FOR_STYLING:
         try:
             if target_cols:
+                # Cek kolom target ada di df
                 valid_cols = [c for c in target_cols if c in df.columns]
+                # Highlight pada kolom target saja, tapi tampilkan semua kolom
                 st.dataframe(df.style.apply(highlight_nulls, axis=1, subset=valid_cols), use_container_width=True)
             else:
                 st.dataframe(df, use_container_width=True)
@@ -309,9 +311,9 @@ def validate_engineering_rules(df_test, df_asset):
                          (res["Gas (MMSCFD)"] > 0) | (res["Condensate (BCPD)"] > 0)
     res['Rule3_Pass'] = ~((produces_something) & (res["Test Duration(Hours)"] <= 0))
 
-    # Rule 1: Frequency Check (Revised)
+    # Rule 1: Frequency Check (Revised with Hierarchy Logic)
     res['Rule1_Pass'] = True 
-    missing_wells = [] # List for missing wells
+    missing_wells_df = pd.DataFrame() # Return DataFrame instead of list
     
     check_rule1_active = False
     
@@ -319,51 +321,68 @@ def validate_engineering_rules(df_test, df_asset):
         if 'Well Status' in df_asset.columns and 'Well' in df_asset.columns:
             check_rule1_active = True
             
-            # 1. Get Active Producing Wells from Asset Register
-            active_prod_mask = df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)
-            active_prod_wells = set(df_asset.loc[active_prod_mask, 'Well'].unique())
+            # --- BAGIAN 1: PENDETEKSIAN SUMUR HILANG SESUAI HIRARKI ---
+            # 1. Ambil data Active Producing dari Asset Register
+            asset_active = df_asset[df_asset['Well Status'].str.contains("Active Well Producing", case=False, na=False)].copy()
             
-            # 2. Get Wells in Test File
-            test_wells = set(res['Well'].unique())
+            # 2. Ambil hirarki unik yang ada di file Well Test (df_test)
+            hierarchy_cols = ["Regional", "Zona", "Working Area", "Asset Operation"]
             
-            # 3. Find Missing Wells (Active but not in Test)
-            missing_wells = list(active_prod_wells - test_wells)
+            # Pastikan kolom hirarki ada di kedua dataframe
+            cols_exist_test = all(col in res.columns for col in hierarchy_cols)
+            cols_exist_asset = all(col in asset_active.columns for col in hierarchy_cols)
             
-            # 4. Check Frequency for Wells IN Test File
-            # Rule: Must have at least 1 test every 3 months.
+            if cols_exist_test and cols_exist_asset:
+                # Ambil kombinasi hirarki unik dari file Well Test
+                test_scope = res[hierarchy_cols].drop_duplicates()
+                
+                # Filter Asset Register: Hanya ambil sumur yang berada di hirarki/scope file Well Test
+                # Inner join akan membuang sumur Asset yang berada di area yang tidak ada di file Test
+                asset_in_scope = asset_active.merge(test_scope, on=hierarchy_cols, how='inner')
+                
+                # Cari sumur di scope ini yang TIDAK ada di data Well Test
+                test_wells_set = set(res['Well'].unique())
+                missing_mask = ~asset_in_scope['Well'].isin(test_wells_set)
+                
+                missing_wells_df = asset_in_scope[missing_mask].copy()
+                
+                # Siapkan set sumur aktif untuk validasi frekuensi
+                active_prod_wells = set(asset_active['Well'].unique())
+                
+            else:
+                # Fallback jika kolom hirarki tidak lengkap, pakai logika lama (hanya nama well)
+                active_prod_wells = set(asset_active['Well'].unique())
+                test_wells_set = set(res['Well'].unique())
+                # Disini kita tidak bisa menentukan missing well dengan akurat tanpa hirarki, jadi kosongkan atau warning
+                missing_wells_df = pd.DataFrame(columns=asset_active.columns)
+
+            # --- BAGIAN 2: CEK FREKUENSI (SAMA SEPERTI SEBELUMNYA) ---
             # Convert date
             res['Test Date'] = pd.to_datetime(res['Test Date (dd/mm/yyyy)'], format='%d/%m/%Y', errors='coerce')
             
             # Filter for wells that are Active Producing found in Test Data
-            # We only enforce this rule for active producing wells
-            active_wells_in_test = test_wells.intersection(active_prod_wells)
+            active_wells_in_test = test_wells_set.intersection(active_prod_wells)
             
             max_date_file = res['Test Date'].max()
             if pd.isna(max_date_file): max_date_file = datetime.now()
             
             bad_frequency_wells = set()
             
-            # Extract relevant data for calculation
-            # We process per well to find gaps
             temp_df = res[res['Well'].isin(active_wells_in_test)][['Well', 'Test Date']].dropna()
             
             if not temp_df.empty:
                 temp_df = temp_df.sort_values(['Well', 'Test Date'])
-                
-                # Internal Gaps (between tests)
                 temp_df['Prev_Date'] = temp_df.groupby('Well')['Test Date'].shift(1)
                 temp_df['Diff_Days'] = (temp_df['Test Date'] - temp_df['Prev_Date']).dt.days
                 
                 wells_with_internal_gaps = temp_df[temp_df['Diff_Days'] > 90]['Well'].unique()
                 bad_frequency_wells.update(wells_with_internal_gaps)
                 
-                # Tail Gaps (last test to max date)
                 last_dates = temp_df.groupby('Well')['Test Date'].max()
                 tail_gaps = (max_date_file - last_dates).dt.days
                 wells_with_tail_gaps = tail_gaps[tail_gaps > 90].index.tolist()
                 bad_frequency_wells.update(wells_with_tail_gaps)
             
-            # Mark error for all rows of bad wells
             res.loc[res['Well'].isin(bad_frequency_wells), 'Rule1_Pass'] = False
 
     res['Keterangan Error'] = ""
@@ -378,7 +397,7 @@ def validate_engineering_rules(df_test, df_asset):
     res['Keterangan Error'] = res['Keterangan Error'].str.rstrip(" | ")
     res.loc[res['Keterangan Error'] == "", 'Keterangan Error'] = "OK"
     
-    return res, missing_wells
+    return res, missing_wells_df
 
 # --- FUNGSI KHUSUS WELL PARAMETER (WELL ON) ---
 
@@ -717,24 +736,28 @@ def main():
                     st.subheader("2. Validasi Kaidah Engineering")
                     
                     # 1. Panggil fungsi validasi
-                    df_eng, missing_wells = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
+                    df_eng, missing_wells_df = validate_engineering_rules(df_filt, st.session_state['asset_register_df'])
                     
                     # 2. Tampilkan Missing Wells (Sumur Aktif tanpa Data Test)
-                    if missing_wells:
-                        st.warning(f"⚠️ Ditemukan **{len(missing_wells)} Sumur Active Producing** yang tidak memiliki data test sama sekali:")
+                    if not missing_wells_df.empty:
+                        st.warning(f"⚠️ Ditemukan **{len(missing_wells_df)} Sumur Active Producing** yang tidak memiliki data test sama sekali pada area ini:")
                         with st.expander("Lihat Daftar Sumur yang Hilang"):
-                            st.dataframe(pd.DataFrame(missing_wells, columns=["Nama Sumur Hilang"]), use_container_width=True)
+                            # Tampilkan Full Columns untuk missing wells
+                            st.dataframe(missing_wells_df, use_container_width=True)
                     else:
-                        st.success("✅ Semua Sumur Active Producing dari Asset Register memiliki data di file Well Test.")
+                        st.success("✅ Semua Sumur Active Producing (pada hirarki yang sesuai) memiliki data di file Well Test.")
 
                     st.write("### 🚨 Data Bermasalah (Problematic Rows)")
                     df_problems = df_eng[df_eng['Keterangan Error'] != "OK"].copy()
                     
+                    # Reorder column: Keterangan Error first
+                    cols = ['Keterangan Error'] + [c for c in df_problems.columns if c != 'Keterangan Error']
+                    df_problems = df_problems[cols]
+
                     if df_problems.empty:
                         st.success("✅ Tidak ditemukan pelanggaran.")
                     else:
-                        display_cols = ['Well', 'Test Date (dd/mm/yyyy)', 'Keterangan Error', 'Test Duration(Hours)', 'Oil (BOPD)']
-                        display_dataframe_optimized(df_problems[display_cols], ['Keterangan Error'], use_highlight=True)
+                        display_dataframe_optimized(df_problems, ['Keterangan Error'], use_highlight=True)
                         csv_eng = df_problems.to_csv(index=False).encode('utf-8')
                         st.download_button("📥 Download Data Bermasalah", csv_eng, "Engineering_Issues.csv", "text/csv")
 
@@ -843,14 +866,14 @@ def main():
                         st.write("### 🚨 Data Bermasalah")
                         df_problems = df_active_eng[df_active_eng['Keterangan Error'] != "OK"].copy()
                         
+                        # Reorder Keterangan Error to first
+                        cols = ['Keterangan Error'] + [c for c in df_problems.columns if c != 'Keterangan Error']
+                        df_problems = df_problems[cols]
+
                         if df_problems.empty:
                             st.success("✅ Tidak ditemukan pelanggaran.")
                         else:
-                            show_cols = ['Well', 'Well Status', 'Keterangan Error']
-                            show_cols += target_check[:5]
-                            show_cols = [c for c in show_cols if c in df_problems.columns]
-                            
-                            display_dataframe_optimized(df_problems[show_cols], ['Keterangan Error'], use_highlight=True)
+                            display_dataframe_optimized(df_problems, ['Keterangan Error'], use_highlight=True)
                                 
                             csv_err = df_problems.to_csv(index=False).encode('utf-8')
                             st.download_button("📥 Download Data Bermasalah", csv_err, f"Engineering_Issues_{lift_type}.csv", "text/csv")
