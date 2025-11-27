@@ -217,7 +217,6 @@ def display_dataframe_optimized(df, target_cols=None, use_highlight=True):
     if use_highlight and total_cells <= MAX_CELLS_FOR_STYLING:
         try:
             if target_cols:
-                # Hanya highlight kolom yang relevan jika ada
                 valid_cols = [c for c in target_cols if c in df.columns]
                 st.dataframe(df.style.apply(highlight_nulls, axis=1, subset=valid_cols), use_container_width=True)
             else:
@@ -238,7 +237,6 @@ def calculate_simple_completeness(df, target_cols):
     return (filled / total_expected) * 100
 
 def get_missing_details(df, target_cols):
-    # Hanya cek kolom yang ada di dataframe
     valid_cols = [c for c in target_cols if c in df.columns]
     temp_df = df[valid_cols].replace('', pd.NA)
     return temp_df.isnull().sum().reset_index(name='Jumlah Kosong').rename(columns={'index': 'Nama Kolom'})
@@ -312,19 +310,28 @@ def calculate_well_param_completeness(df, lift_type):
     """
     Hitung kelengkapan sesuai aturan: Hanya untuk Active Well.
     Kolom Dynamic/Static wajib bersyarat.
+    
+    Mengembalikan: None jika tidak ada active well, Float jika ada.
     """
-    if df.empty: return 0.0
+    if df.empty: return None
     
     config = WELL_PARAM_CONFIG[lift_type]
     base_cols = config['check_cols']
     cond_map = config['conditional'] # Dictionary nama kolom Dynamic/Static
     
-    # 1. Filter hanya Active Well
+    # 1. Filter hanya Active Well (Producing & Non Production)
+    if 'Well Status' not in df.columns:
+        return None
+        
     df['Status_Norm'] = df['Well Status'].astype(str).str.strip()
-    mask_active = df['Status_Norm'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
     
+    # Regex untuk menangkap kedua status active
+    mask_active = df['Status_Norm'].str.contains("Active Well Producing|Active Well Non Production", case=False, na=False)
     df_active = df[mask_active].copy()
-    if df_active.empty: return 0.0 # Jika tidak ada sumur aktif, return 0 (atau 100? Biasnya 0 karena tidak ada data yg bisa dicek)
+    
+    # Jika TIDAK ADA sumur aktif sama sekali di data ini, kembalikan None
+    if df_active.empty: 
+        return None 
 
     mask_producing = df_active['Status_Norm'].str.contains("Active Well Producing", case=False, na=False)
     mask_non_prod = df_active['Status_Norm'].str.contains("Active Well Non Production", case=False, na=False)
@@ -336,15 +343,17 @@ def calculate_well_param_completeness(df, lift_type):
     # 3. Hitung Conditional Columns
     if 'Dynamic' in cond_map:
         dyn_col = cond_map['Dynamic']
-        # Wajib untuk Producing
-        total_expected += mask_producing.sum()
-        total_filled += df_active.loc[mask_producing, dyn_col].replace('', pd.NA).notna().sum()
+        if dyn_col in df_active.columns:
+            # Wajib untuk Producing
+            total_expected += mask_producing.sum()
+            total_filled += df_active.loc[mask_producing, dyn_col].replace('', pd.NA).notna().sum()
         
     if 'Static' in cond_map:
         stat_col = cond_map['Static']
-        # Wajib untuk Non Production
-        total_expected += mask_non_prod.sum()
-        total_filled += df_active.loc[mask_non_prod, stat_col].replace('', pd.NA).notna().sum()
+        if stat_col in df_active.columns:
+            # Wajib untuk Non Production
+            total_expected += mask_non_prod.sum()
+            total_filled += df_active.loc[mask_non_prod, stat_col].replace('', pd.NA).notna().sum()
         
     if total_expected == 0: return 0.0
     return (total_filled / total_expected) * 100
@@ -693,28 +702,40 @@ def main():
                     st.info("Pengecekan hanya untuk Active Well Producing & Active Well Non Production.")
                     
                     score = calculate_well_param_completeness(df_filt, lift_type)
-                    st.metric("Total Completeness (Active Wells)", f"{score:.2f}%")
+                    
+                    # Logika tampilan pesan khusus jika tidak ada data aktif
+                    if score is None:
+                        st.warning(f"⚠️ **Lifting Method {lift_type} tidak terdapat pada area ini** (Tidak ada Active Well Producing/Non Production).")
+                    else:
+                        st.metric("Total Completeness (Active Wells)", f"{score:.2f}%")
 
-                    next_level_idx = last_selected_level + 1
-                    if next_level_idx < len(WELL_PARAM_HIERARCHY):
-                        breakdown_col = WELL_PARAM_HIERARCHY[next_level_idx]
-                        if breakdown_col in df_filt.columns:
-                            st.markdown(f"**Breakdown Completeness per {breakdown_col}:**")
-                            
-                            try:
-                                # Hitung Breakdown
-                                # Karena logic completeness well param cukup kompleks (conditional), 
-                                # kita tidak bisa pakai groupby simple. Kita iterasi group unik saja (biasanya jumlah grup tidak terlalu banyak)
-                                groups = df_filt[breakdown_col].unique()
-                                breakdown_data = []
-                                for g in groups:
-                                    sub_df = df_filt[df_filt[breakdown_col] == g]
-                                    sub_score = calculate_well_param_completeness(sub_df, lift_type)
-                                    breakdown_data.append({breakdown_col: g, "Completeness (%)": sub_score, "Jumlah Data": len(sub_df)})
+                        next_level_idx = last_selected_level + 1
+                        if next_level_idx < len(WELL_PARAM_HIERARCHY):
+                            breakdown_col = WELL_PARAM_HIERARCHY[next_level_idx]
+                            if breakdown_col in df_filt.columns:
+                                st.markdown(f"**Breakdown Completeness per {breakdown_col}:**")
                                 
-                                st.dataframe(pd.DataFrame(breakdown_data).sort_values("Completeness (%)"), use_container_width=True)
-                            except:
-                                st.warning("Gagal membuat breakdown otomatis.")
+                                try:
+                                    groups = df_filt[breakdown_col].unique()
+                                    breakdown_data = []
+                                    for g in groups:
+                                        sub_df = df_filt[df_filt[breakdown_col] == g]
+                                        sub_score = calculate_well_param_completeness(sub_df, lift_type)
+                                        
+                                        # Hanya tampilkan di tabel jika ada data aktif (score tidak None)
+                                        if sub_score is not None:
+                                            breakdown_data.append({
+                                                breakdown_col: g, 
+                                                "Completeness (%)": sub_score, 
+                                                "Jumlah Baris": len(sub_df)
+                                            })
+                                    
+                                    if breakdown_data:
+                                        st.dataframe(pd.DataFrame(breakdown_data).sort_values("Completeness (%)"), use_container_width=True)
+                                    else:
+                                        st.info(f"Tidak ada {breakdown_col} yang memiliki sumur aktif untuk metode ini.")
+                                except:
+                                    st.warning("Gagal membuat breakdown otomatis.")
                     
                     with st.expander("Detail Tabel Data"):
                         display_dataframe_optimized(df_filt, target_check)
@@ -738,7 +759,6 @@ def main():
                         st.success("✅ Tidak ditemukan pelanggaran.")
                     else:
                         show_cols = ['Well', 'Well Status', 'Keterangan Error']
-                        # Tambahkan beberapa kolom sample dari target_check
                         show_cols += target_check[:5]
                         show_cols = [c for c in show_cols if c in df_problems.columns]
                         
